@@ -23,7 +23,7 @@ try:
     os.environ["IMAGEIO_FFMPEG_EXE"] = ffmpeg_exe
     ffmpeg_dir = str(Path(ffmpeg_exe).parent)
     if ffmpeg_dir not in os.environ.get("PATH", ""):
-        os.environ["PATH"] = f"{ffmpeg_dir};{os.environ.get('PATH', '')}"
+        os.environ["PATH"] = f"{ffmpeg_dir}{os.pathsep}{os.environ.get('PATH', '')}"
 except Exception:
     pass
 

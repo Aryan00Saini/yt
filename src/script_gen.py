@@ -5,206 +5,198 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 from src.utils import logger
 
+
 class Scene(BaseModel):
-    narration: str = Field(description="The spoken narration text for this scene (punchy, 1-2 sentences)")
-    visual_keywords: List[str] = Field(description="2-4 search keywords for finding relevant stock video clips")
+    narration: str = Field(description="8-14 spoken words")
+    visual_keywords: List[str] = Field(description="2-4 literal, filmable search terms, most specific first")
+    image_prompt: str = Field(description="One sentence describing a single still image for this scene, no text in image")
+    emphasis: List[str] = Field(default_factory=list, description="1-2 words copied exactly from narration that carry the key fact (a number, a name, or the surprising word)")
+    card_text: Optional[str] = Field(default=None, description="A striking number or 1-3 word phrase to show full-screen instead of a visual. Use in at most 2 scenes total. Null for most scenes.")
+
 
 class ShortScript(BaseModel):
     title: str = Field(description="Catchy YouTube Short title under 60 characters with hook")
     description: str = Field(description="Description with relevant tags and summary")
     tags: List[str] = Field(description="5-8 relevant trending tags")
-    scenes: List[Scene] = Field(description="Ordered list of scenes composing the short (typically 4 to 7 scenes)")
+    hook_text: str = Field(description="Max 4 words ALL CAPS — the most shocking part of the hook, shown as a text overlay in the first 1.8 seconds")
+    scenes: List[Scene] = Field(description="Ordered list of scenes composing the short")
 
-PROMPT_TEMPLATE = """You are a viral YouTube Shorts scriptwriter. Create an engaging, fast-paced script for a 9:16 vertical short video.
 
-Topic: {topic}
-Target Duration: {duration} seconds (roughly 110-140 words total narration).
+PROMPT_TEMPLATE = """You are a scriptwriter for a faceless {niche} Shorts channel. Write a {duration}-second script about: {topic}
 
-Rules:
-1. Strong Hook: The very first sentence MUST grab attention instantly (curiosity gap, shocking fact, or question).
-2. Pacing: Break the content into 4-7 short, punchy scenes.
-3. Narration: Keep it natural, energetic, conversational. No generic filler words.
-4. Visual Keywords: For each scene, give 2-4 clean, literal keywords suitable for stock video search (e.g., ["deep space nebula", "black hole", "galaxy"]).
-5. Return strictly valid JSON with no markdown wrapping (do NOT use ```json code fences).
+Structure
+- Scene 1 (the hook, max 12 words): a surprising claim, a specific number, or a question that opens a curiosity gap. Never start with "Did you know", "Imagine", "Hey guys" or "Welcome".
+- Middle scenes: one new fact or beat per scene. Each should make the viewer want the next one.
+- Last scene: a payoff line that echoes the hook so the video loops. No "subscribe", "like" or "follow".
 
-Expected JSON Structure:
-{{
-  "title": "Short catchy title with hook",
-  "description": "Engaging description #shorts #topic",
-  "tags": ["shorts", "tag1", "tag2"],
-  "scenes": [
-    {{
-      "narration": "What if I told you that a single teaspoon of a neutron star weighs as much as Mount Everest?",
-      "visual_keywords": ["neutron star space", "glowing celestial body"]
-    }},
-    ...
-  ]
-}}
+Rules
+- Exactly {scene_count} scenes, 8-14 words of narration each, about {words} words in total.
+- Spoken style: short sentences, contractions, plain words, specific numbers and names instead of vague claims.
+- Include only claims you are highly confident are true. If unsure, leave it out. No invented statistics, studies or quotes.
+- visual_keywords: literal things a camera can film (noun + setting), e.g. "astronaut floating", "rocket launch night". Most specific first. Never abstract words like mystery, power, secret, amazing.
+- image_prompt: one sentence, one subject, no text in the image.
+- emphasis: copy 1-2 words exactly from that scene's narration — the number, name, or most surprising word. These will appear in a different color on screen.
+- card_text: a striking number or 1-3 word phrase shown full-screen instead of a visual. Use in at most 2 scenes across the whole script; set to null for all other scenes.
+- hook_text: max 4 words ALL CAPS distilling the most shocking part of scene 1 (e.g. "10 BILLION DEGREES"). This overlays the first 1.8 seconds.
 """
+
 
 def clean_json_response(raw_text: str) -> str:
     """Removes markdown code fences and extracts the raw JSON substring."""
     text = raw_text.strip()
-    # Remove markdown code fences if present
     text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.MULTILINE)
     text = re.sub(r"```$", "", text, flags=re.MULTILINE)
     text = text.strip()
-    
-    # In case there is text before or after the JSON object
     match = re.search(r"(\{.*\})", text, flags=re.DOTALL)
-    if match:
-        return match.group(1).strip()
-    return text
+    return match.group(1).strip() if match else text
 
-def generate_script_gemini(topic: str, duration: int = 45, api_key: Optional[str] = None) -> ShortScript:
-    """Generates structured script using Google Gemini API."""
+
+def generate_script_gemini(
+    topic: str,
+    duration: int = 45,
+    api_key: Optional[str] = None,
+    niche: str = "science facts",
+    model_name: str = "gemini-2.5-flash",
+    words_per_second: float = 2.5,
+    seconds_per_scene: float = 3.5,
+) -> ShortScript:
+    """Generates structured script using Google Gemini structured output."""
     key = api_key or os.getenv("GEMINI_API_KEY")
     if not key:
         raise ValueError("GEMINI_API_KEY is not set in environment or .env file.")
 
-    prompt = PROMPT_TEMPLATE.format(topic=topic, duration=duration)
-    
-    # Try using google.genai or fallback to google.generativeai or requests
-    try:
-        from google import genai
-        client = genai.Client(api_key=key)
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-        )
-        raw_text = response.text
-    except ImportError:
-        # Fallback to requests directly for zero-dependency API call
-        import requests
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={key}"
-        resp = requests.post(url, json={"contents": [{"parts": [{"text": prompt}]}]}, timeout=30)
-        resp.raise_for_fail() if hasattr(resp, "raise_for_fail") else resp.raise_for_status()
-        data = resp.json()
-        raw_text = data["candidates"][0]["content"]["parts"][0]["text"]
+    scene_count = max(4, round(duration / seconds_per_scene))
+    words = round(duration * words_per_second)
+    prompt = PROMPT_TEMPLATE.format(
+        topic=topic,
+        duration=duration,
+        niche=niche,
+        scene_count=scene_count,
+        words=words,
+    )
 
-    cleaned = clean_json_response(raw_text)
-    
-    try:
-        data = json.loads(cleaned)
-        return ShortScript.model_validate(data)
-    except Exception as e:
-        logger.warning(f"Failed parsing Gemini JSON response on first attempt: {e}. Retrying with repair...")
-        # Simple repair attempt
-        cleaned = re.sub(r",\s*([\]}])", r"\1", cleaned)
-        data = json.loads(cleaned)
-        return ShortScript.model_validate(data)
+    from google import genai
+    from google.genai import types
 
-def generate_script_groq(topic: str, duration: int = 45, api_key: Optional[str] = None) -> ShortScript:
+    client = genai.Client(api_key=key)
+    resp = client.models.generate_content(
+        model=model_name,
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=ShortScript,
+            temperature=0.8,
+        ),
+    )
+    return resp.parsed
+
+
+def generate_script_groq(
+    topic: str,
+    duration: int = 45,
+    api_key: Optional[str] = None,
+    niche: str = "science facts",
+    words_per_second: float = 2.5,
+    seconds_per_scene: float = 3.5,
+) -> ShortScript:
     """Generates structured script using Groq API (fallback)."""
     import requests
+
     key = api_key or os.getenv("GROQ_API_KEY")
     if not key:
         raise ValueError("GROQ_API_KEY is not set.")
 
-    prompt = PROMPT_TEMPLATE.format(topic=topic, duration=duration)
-    url = "https://api.groq.com/openai/v1/chat/completions"
-    headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json"
-    }
-    payload = {
-        "model": "llama-3.3-70b-versatile",
-        "messages": [
-            {"role": "system", "content": "You are a professional YouTube Shorts scriptwriter who outputs valid JSON only."},
-            {"role": "user", "content": prompt}
-        ],
-        "response_format": {"type": "json_object"},
-        "temperature": 0.7
-    }
-    resp = requests.post(url, headers=headers, json=payload, timeout=30)
-    resp.raise_for_status()
-    raw_text = resp.json()["choices"][0]["message"]["content"]
-    cleaned = clean_json_response(raw_text)
-    data = json.loads(cleaned)
-    return ShortScript.model_validate(data)
-
-def generate_script_fallback(topic: str, duration: int = 45) -> ShortScript:
-    """Mock/offline fallback generator if no API keys are present."""
-    logger.info("Using built-in template generator (offline fallback)")
-    return ShortScript(
-        title=f"The Truth About {topic.title()} #Shorts",
-        description=f"Discover fascinating facts about {topic}! Subscribe for more. #Shorts #{topic.replace(' ', '')}",
-        tags=["shorts", "facts", "curiosity", topic.lower()],
-        scenes=[
-            Scene(
-                narration=f"Did you know the universe is full of mysteries, and {topic} is one of the most astonishing?",
-                visual_keywords=[topic, "mystery universe", "galaxy space"]
-            ),
-            Scene(
-                narration=f"Scientists have discovered incredible phenomena that completely challenge how we understand {topic}.",
-                visual_keywords=["laboratory scientist", "quantum physics", "technology"]
-            ),
-            Scene(
-                narration="Every single observation reveals details that seem almost impossible to believe.",
-                visual_keywords=["mind blowing discovery", "cinematic space", "abstract light"]
-            ),
-            Scene(
-                narration="Subscribe right now if you want to uncover more mind-blowing secrets of the cosmos!",
-                visual_keywords=["subscribe reminder", "space zoom", "cinematic motion"]
-            )
-        ]
+    scene_count = max(4, round(duration / seconds_per_scene))
+    words = round(duration * words_per_second)
+    prompt = PROMPT_TEMPLATE.format(
+        topic=topic,
+        duration=duration,
+        niche=niche,
+        scene_count=scene_count,
+        words=words,
     )
 
-def generate_script(topic: str, duration: int = 45) -> ShortScript:
-    """Main entry for script generation."""
+    schema_hint = json.dumps(ShortScript.model_json_schema())
+    resp = requests.post(
+        "https://api.groq.com/openai/v1/chat/completions",
+        headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
+        json={
+            "model": "llama-3.3-70b-versatile",
+            "messages": [
+                {"role": "system", "content": f"Output valid JSON matching this schema: {schema_hint}"},
+                {"role": "user", "content": prompt},
+            ],
+            "response_format": {"type": "json_object"},
+            "temperature": 0.7,
+        },
+        timeout=30,
+    )
+    resp.raise_for_status()
+    raw_text = resp.json()["choices"][0]["message"]["content"]
+    return ShortScript.model_validate(json.loads(clean_json_response(raw_text)))
+
+
+def generate_script(
+    topic: str,
+    duration: int = 45,
+    niche: str = "science facts",
+    model_name: str = "gemini-2.5-flash",
+    words_per_second: float = 2.5,
+    seconds_per_scene: float = 3.5,
+) -> ShortScript:
+    """Main entry for script generation. Fails loudly if no LLM key is set or all providers fail."""
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
 
+    if not gemini_key and not groq_key:
+        raise RuntimeError(
+            "No LLM API key found. Set GEMINI_API_KEY or GROQ_API_KEY in .env before running."
+        )
+
+    errors = []
     if gemini_key:
         try:
-            logger.info(f"Generating script using Gemini for topic: '{topic}'...")
-            return generate_script_gemini(topic, duration, gemini_key)
+            logger.info(f"Generating script using Gemini ({model_name}) for topic: '{topic}'...")
+            return generate_script_gemini(
+                topic, duration, gemini_key, niche=niche, model_name=model_name,
+                words_per_second=words_per_second, seconds_per_scene=seconds_per_scene
+            )
         except Exception as e:
-            logger.error(f"Gemini generation error: {e}. Falling back to Groq or template...")
+            logger.error(f"Gemini generation error: {e}")
+            errors.append(f"Gemini: {e}")
 
     if groq_key:
         try:
             logger.info(f"Generating script using Groq for topic: '{topic}'...")
-            return generate_script_groq(topic, duration, groq_key)
+            return generate_script_groq(
+                topic, duration, groq_key, niche=niche,
+                words_per_second=words_per_second, seconds_per_scene=seconds_per_scene
+            )
         except Exception as e:
-            logger.error(f"Groq generation error: {e}. Falling back to template...")
-    
-    return generate_script_fallback(topic, duration)
+            logger.error(f"Groq generation error: {e}")
+            errors.append(f"Groq: {e}")
+
+    raise RuntimeError("All script generation providers failed: " + " | ".join(errors))
 
 
 CUSTOM_SCRIPT_PROMPT = """You are a YouTube Shorts video director.
-Take the user's EXACT script below and split it into 4-7 visual scenes.
+Take the user's EXACT script below and split it into visual scenes (roughly 2.5-4 seconds each).
 
 CRITICAL RULES:
 1. Do NOT rewrite, summarize, or alter the user's words. Keep the exact narration text across the scenes in order.
-2. For each scene, provide 2-4 literal, descriptive visual keywords for finding matching images/videos.
+2. For each scene, provide 2-4 literal, filmable visual_keywords (most specific first) and a one-sentence image_prompt (no text in image).
 3. Generate a catchy title (under 60 chars), description with #Shorts, and 5-8 tags.
-4. Return strictly valid JSON with no markdown code fences.
+4. Return strictly valid JSON.
 
 User Script:
 \"\"\"{custom_script}\"\"\"
-
-Expected JSON Structure:
-{{
-  "title": "Short catchy title",
-  "description": "Engaging description #Shorts",
-  "tags": ["shorts", "tag1", "tag2"],
-  "scenes": [
-    {{
-      "narration": "Exact sentence(s) from the user's script...",
-      "visual_keywords": ["keyword 1", "keyword 2"]
-    }}
-  ]
-}}
 """
 
 
 def _split_custom_script_offline(script_text: str, title: Optional[str] = None) -> ShortScript:
     """Splits a custom script into scenes without an LLM by paragraphs or sentences."""
-    # Prefer blank-line paragraphs if the user separated scenes manually
     paragraphs = [p.strip() for p in re.split(r"\n\s*\n", script_text.strip()) if p.strip()]
     if len(paragraphs) < 2:
-        # Split into sentences and group 1-2 sentences per scene
         sentences = [s.strip() for s in re.split(r"(?<=[.!?])\s+", script_text.strip()) if s.strip()]
         paragraphs = []
         chunk_size = max(1, (len(sentences) + 4) // 5) if len(sentences) > 5 else 1
@@ -222,22 +214,19 @@ def _split_custom_script_offline(script_text: str, title: Optional[str] = None) 
         keywords = [w for w in words if len(w) > 3 and w not in stop_words][:4]
         if not keywords:
             keywords = ["cinematic background", "abstract motion"]
-        scenes.append(Scene(narration=p, visual_keywords=keywords))
+        scenes.append(Scene(narration=p, visual_keywords=keywords, image_prompt=p))
 
     clean_title = (title or paragraphs[0][:50].rstrip(".,!?")) + " #Shorts"
     return ShortScript(
         title=clean_title[:60],
         description=f"{paragraphs[0]}\n\n#Shorts",
         tags=["shorts", "story", "facts"],
-        scenes=scenes
+        scenes=scenes,
     )
 
 
 def generate_script_from_custom_text(script_text: str, title: Optional[str] = None) -> ShortScript:
-    """
-    Converts a user-provided custom script into a structured ShortScript while
-    preserving the user's exact narration.
-    """
+    """Converts a user-provided custom script into a structured ShortScript while preserving narration."""
     prompt = CUSTOM_SCRIPT_PROMPT.format(custom_script=script_text.strip())
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
@@ -246,10 +235,18 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
         try:
             logger.info("Structuring custom script into scenes using Gemini...")
             from google import genai
+            from google.genai import types
             client = genai.Client(api_key=gemini_key)
-            response = client.models.generate_content(model="gemini-2.5-flash", contents=prompt)
-            cleaned = clean_json_response(response.text)
-            parsed = ShortScript.model_validate(json.loads(cleaned))
+            resp = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=ShortScript,
+                    temperature=0.3,
+                ),
+            )
+            parsed = resp.parsed
             if title:
                 parsed.title = title[:60]
             return parsed
@@ -267,7 +264,7 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
                     "model": "llama-3.3-70b-versatile",
                     "messages": [
                         {"role": "system", "content": "Output valid JSON only."},
-                        {"role": "user", "content": prompt}
+                        {"role": "user", "content": prompt},
                     ],
                     "response_format": {"type": "json_object"},
                     "temperature": 0.3,
@@ -275,8 +272,7 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
                 timeout=30,
             )
             resp.raise_for_status()
-            cleaned = clean_json_response(resp.json()["choices"][0]["message"]["content"])
-            parsed = ShortScript.model_validate(json.loads(cleaned))
+            parsed = ShortScript.model_validate(json.loads(clean_json_response(resp.json()["choices"][0]["message"]["content"])))
             if title:
                 parsed.title = title[:60]
             return parsed

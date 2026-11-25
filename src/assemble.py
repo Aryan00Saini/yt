@@ -1,7 +1,7 @@
 import os
 import random
 from pathlib import Path
-from typing import List, Dict, Any, Optional
+from typing import FrozenSet, List, Dict, Any, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
@@ -10,205 +10,272 @@ from moviepy.editor import (
     CompositeAudioClip,
     concatenate_videoclips,
     ImageClip,
-    CompositeVideoClip
+    CompositeVideoClip,
 )
-from moviepy.audio.fx.all import volumex
+from moviepy.audio.fx.all import volumex, audio_fadein, audio_fadeout
 
-from src.utils import logger, MUSIC_DIR
-from src.animate import prepare_scene_visual
+from src.utils import logger, MUSIC_DIR, FONTS_DIR, ASSETS_DIR
+from src.animate import (
+    prepare_scene_visual,
+    make_text_card,
+    _ease_out_back,
+    _font_for_size,
+)
 
-def render_caption_frame(
-    words_group: List[Dict[str, Any]],
-    current_time: float,
+STRIP_H = 360
+
+# ── Word normaliser (used for emphasis matching) ───────────────────────────────
+def _clean(w: str) -> str:
+    return w.lower().strip(".,!?;:\"'()[]{}")
+
+
+# ── Font helper (thin wrapper kept for backward compat) ───────────────────────
+def _font(size: int) -> ImageFont.FreeTypeFont:
+    return _font_for_size(size)
+
+
+# ── Caption rendering ──────────────────────────────────────────────────────────
+
+def render_caption_strip(
+    words: List[Dict[str, Any]],
+    active_idx: int,
     width: int = 1080,
-    height: int = 1920,
-    font_size: int = 48,
+    font_size: int = 92,
     highlight_color: str = "#FFE600",
     text_color: str = "#FFFFFF",
     stroke_color: str = "#000000",
-    stroke_width: int = 2
-) -> Optional[np.ndarray]:
+    stroke_width: int = 7,
+    emphasis: FrozenSet[str] = frozenset(),
+    emphasis_color: str = "#FF3B3B",
+) -> np.ndarray:
+    """Renders a 1080×360 transparent RGBA caption strip.
+
+    Active word → highlight_color.
+    Emphasis words (key facts) → emphasis_color when not active.
+    All others → text_color.
     """
-    Renders transparent RGBA overlay image with active word highlight.
-    """
-    # Create transparent image
-    img = Image.new("RGBA", (width, height), (0, 0, 0, 0))
-    draw = ImageDraw.Draw(img)
-
-    try:
-        font = ImageFont.truetype("arialbd.ttf", font_size)
-    except IOError:
-        try:
-            font = ImageFont.truetype("arial.ttf", font_size)
-        except IOError:
-            font = ImageFont.load_default()
-
-    # Auto-scale font size so the batch always fits comfortably inside width - 160px
-    max_line_width = width - 160
-    spacing = int(font_size * 0.28)
-    while font_size > 32:
-        try:
-            font = ImageFont.truetype("arialbd.ttf", font_size)
-        except IOError:
+    img = Image.new("RGBA", (width, STRIP_H), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    texts = [w["word"].upper() for w in words]
+    size = font_size
+    while True:
+        f, gap = _font(size), int(size * 0.3)
+        widths = [d.textlength(t, font=f) for t in texts]
+        total = sum(widths) + gap * max(0, len(texts) - 1)
+        if total <= width - 120 or size <= 44:
             break
-        spacing = int(font_size * 0.28)
-        test_width = sum(
-            (draw.textbbox((0, 0), w_info["word"], font=font)[2] -
-             draw.textbbox((0, 0), w_info["word"], font=font)[0])
-            for w_info in words_group
-        ) + spacing * max(0, len(words_group) - 1)
-        if test_width <= max_line_width:
-            break
-        font_size -= 2
-
-    # Calculate bounding boxes for the line of words
-    word_boxes = []
-    total_text_width = 0
-    max_text_height = 0
-
-    for w_info in words_group:
-        w_text = w_info["word"]
-        bbox = draw.textbbox((0, 0), w_text, font=font)
-        w_w = bbox[2] - bbox[0]
-        w_h = bbox[3] - bbox[1]
-        word_boxes.append((w_text, w_w, w_h, w_info["start"], w_info["end"]))
-        total_text_width += w_w
-        max_text_height = max(max_text_height, w_h)
-
-    total_width = total_text_width + spacing * max(0, len(words_group) - 1)
-    start_x = (width - total_width) // 2
-    # Vertical placement: lower third
-    start_y = int(height * 0.72)
-
-    # Subtle dark pill behind caption line for readability
-    pad_x, pad_y = 20, 10
-    draw.rounded_rectangle(
-        [start_x - pad_x, start_y - pad_y, start_x + total_width + pad_x, start_y + max_text_height + pad_y + 6],
-        radius=14,
-        fill=(0, 0, 0, 125)
-    )
-
-    curr_x = start_x
-    for w_text, w_w, w_h, w_start, w_end in word_boxes:
-        # Determine if this word is currently active
-        is_active = w_start <= current_time <= w_end
-        fill = highlight_color if is_active else text_color
-
-        draw.text(
-            (curr_x, start_y),
-            w_text,
-            font=font,
-            fill=fill,
-            stroke_width=stroke_width,
-            stroke_fill=stroke_color
-        )
-        curr_x += w_w + spacing
-
+        size -= 4
+    x, y = (width - total) / 2, (STRIP_H - size) // 2
+    for i, (t, wd) in enumerate(zip(texts, widths)):
+        if i == active_idx:
+            fill = highlight_color
+        elif _clean(words[i]["word"]) in emphasis:
+            fill = emphasis_color
+        else:
+            fill = text_color
+        d.text((x, y), t, font=f, fill=fill, stroke_width=stroke_width, stroke_fill=stroke_color)
+        x += wd + gap
     return np.array(img)
+
 
 def create_caption_clips(
     word_timestamps: List[Dict[str, Any]],
-    total_duration: float,
+    total_duration: Optional[float] = None,
     words_per_batch: int = 3,
     width: int = 1080,
     height: int = 1920,
-    font_size: int = 48,
+    font_size: int = 92,
     highlight_color: str = "#FFE600",
     text_color: str = "#FFFFFF",
     stroke_color: str = "#000000",
-    stroke_width: int = 2
+    stroke_width: int = 7,
+    y_frac: float = 0.62,
+    emphasis: FrozenSet[str] = frozenset(),
+    emphasis_color: str = "#FF3B3B",
+    caption_pop: float = 0.18,
 ) -> List[Any]:
+    """Creates MoviePy ImageClips for dynamic karaoke captions.
+
+    Each word pops in with a quick scale-up (caption_pop) for energy.
+    Key facts (emphasis set) stay in emphasis_color when not highlighted.
     """
-    Creates MoviePy clips for dynamic captions with active word highlighting.
-    Groups words into short batches (e.g. 2-3 words) to keep the screen snappy.
-    """
-    caption_clips = []
-    if not word_timestamps:
-        return caption_clips
-
-    # Group words into batches
-    batches = []
-    for i in range(0, len(word_timestamps), words_per_batch):
-        batches.append(word_timestamps[i:i + words_per_batch])
-
-    for batch in batches:
-        b_start = batch[0]["start"]
-        b_end = batch[-1]["end"]
-        
-        # Slight buffer to prevent flicker between batches
-        b_duration = max(0.1, b_end - b_start)
-
-        # For each word in the batch, generate an individual sub-clip with highlighting
-        for w_info in batch:
-            w_start = max(b_start, w_info["start"])
-            w_end = min(b_end, w_info["end"])
-            
-            # Midpoint time for sampling highlight state
-            mid_t = (w_start + w_end) / 2.0
-            
-            frame_arr = render_caption_frame(
-                batch,
-                current_time=mid_t,
-                width=width,
-                height=height,
-                font_size=font_size,
-                highlight_color=highlight_color,
-                text_color=text_color,
-                stroke_color=stroke_color,
-                stroke_width=stroke_width
+    clips, n = [], len(word_timestamps)
+    for i in range(0, n, words_per_batch):
+        batch = word_timestamps[i:i + words_per_batch]
+        next_start = word_timestamps[i + words_per_batch]["start"] if i + words_per_batch < n else None
+        for k, w in enumerate(batch):
+            if k + 1 < len(batch):
+                end = batch[k + 1]["start"]
+            else:
+                end = min(next_start, batch[-1]["end"] + 0.3) if next_start else batch[-1]["end"] + 0.2
+            dur = max(0.05, end - w["start"])
+            strip = render_caption_strip(
+                batch, k, width, font_size,
+                highlight_color, text_color, stroke_color, stroke_width,
+                emphasis=emphasis, emphasis_color=emphasis_color,
             )
-            
-            word_clip = (
-                ImageClip(frame_arr)
-                .set_start(w_start)
-                .set_duration(max(0.05, w_end - w_start))
-            )
-            caption_clips.append(word_clip)
+            c = ImageClip(strip).set_duration(dur)
+            if caption_pop > 0:
+                c = c.resize(lambda t, _pop=caption_pop: 1.0 + _pop * max(0.0, 1.0 - t / 0.12))
+            c = (c.set_start(w["start"])
+                  .set_position(("center", int(height * y_frac))))
+            clips.append(c)
+    return clips
 
-    return caption_clips
+
+# ── Hook text overlay (first 1.8 s) ───────────────────────────────────────────
+
+def make_hook_clip(
+    text: str,
+    width: int = 1080,
+    height: int = 1920,
+    dur: float = 1.8,
+) -> ImageClip:
+    """Large ALL-CAPS hook text that pops in at t=0 with overshoot easing."""
+    if not text:
+        return None
+    img = Image.new("RGBA", (width, 420), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    upper = text.upper()
+    size = 130
+    while d.textlength(upper, font=_font(size)) > width - 120 and size > 50:
+        size -= 4
+    f = _font(size)
+    tw = d.textlength(upper, font=f)
+    d.text(
+        ((width - tw) / 2, (420 - size) // 2),
+        upper,
+        font=f,
+        fill="#FFFFFF",
+        stroke_width=9,
+        stroke_fill="#000000",
+    )
+    return (
+        ImageClip(np.array(img))
+        .set_start(0)
+        .set_duration(dur)
+        .resize(lambda t: max(0.05, _ease_out_back(min(1.0, t / 0.25))))
+        .set_position(("center", int(height * 0.24)))
+    )
+
+
+# ── Background music ───────────────────────────────────────────────────────────
 
 def pick_background_music() -> Optional[Path]:
-    """Finds a royalty-free music track in assets/music/ if available."""
+    """Picks a random royalty-free track from assets/music/."""
     if not MUSIC_DIR.exists():
         return None
     tracks = list(MUSIC_DIR.glob("*.mp3")) + list(MUSIC_DIR.glob("*.wav"))
-    if tracks:
-        return random.choice(tracks)
-    return None
+    return random.choice(tracks) if tracks else None
+
+
+# ── Sound effects ──────────────────────────────────────────────────────────────
+
+def build_sfx_clips(
+    scene_durations: List[float],
+    sfx_volume: float = 0.3,
+    sfx_every: int = 2,
+) -> List[Any]:
+    """
+    Returns a list of AudioFileClip objects timed to scene cuts.
+    - hit.wav   → plays at t=0 (hook impact).
+    - whoosh.wav → plays 0.1 s before every Nth scene cut.
+    Files are loaded from assets/sfx/; missing files are silently skipped.
+    """
+    sfx_dir = ASSETS_DIR / "sfx"
+    clips = []
+    t = 0.0
+
+    hit_path = sfx_dir / "hit.wav"
+    if hit_path.exists():
+        try:
+            clips.append(volumex(AudioFileClip(str(hit_path)), sfx_volume * 1.6).set_start(0))
+        except Exception as e:
+            logger.warning(f"Could not load hit.wav: {e}")
+
+    whoosh_path = sfx_dir / "whoosh.wav"
+    if whoosh_path.exists():
+        for i, d in enumerate(scene_durations[:-1]):
+            t += d
+            if i % sfx_every == 0:
+                try:
+                    clips.append(
+                        volumex(AudioFileClip(str(whoosh_path)), sfx_volume)
+                        .set_start(max(0.0, t - 0.1))
+                    )
+                except Exception as e:
+                    logger.warning(f"Could not load whoosh.wav at t={t:.2f}: {e}")
+    return clips
+
+
+# ── Main assembler ─────────────────────────────────────────────────────────────
 
 def assemble_short(
-    scene_visuals: List[Path],
+    scene_visuals: List[Optional[Path]],
     scene_durations: List[float],
     voiceover_path: Path,
     word_timestamps: List[Dict[str, Any]],
     output_path: Path,
-    config: dict
+    config: dict,
+    draft: bool = False,
+    hook_text: str = "",
+    emphasis: FrozenSet[str] = frozenset(),
+    scenes: Optional[list] = None,       # list of Scene objects for card_text detection
 ) -> Path:
-    """
-    Combines scene visuals, voiceover, dynamic captions, and background music into the final MP4.
-    """
+    """Combines scene visuals, voiceover, captions, music, SFX, and overlays into the final MP4."""
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    video_cfg = config.get("video", {})
-    audio_cfg = config.get("audio", {})
+
+    video_cfg  = config.get("video", {})
+    audio_cfg  = config.get("audio", {})
+    cap_cfg    = config.get("captions", {})
+    render_cfg = config.get("render", {})
+    fx_cfg     = config.get("effects", {})
+
     target_w = video_cfg.get("width", 1080)
     target_h = video_cfg.get("height", 1920)
-    fps = video_cfg.get("fps", 30)
+    fps      = video_cfg.get("fps", 30)
+
+    punch        = float(fx_cfg.get("punch", 0.07))
+    caption_pop  = float(fx_cfg.get("caption_pop", 0.18))
+    emph_color   = fx_cfg.get("emphasis_color", "#FF3B3B")
+    sfx_volume   = float(fx_cfg.get("sfx_volume", 0.3))
+    sfx_every    = int(fx_cfg.get("sfx_every", 2))
+    apply_grade  = bool(fx_cfg.get("grade", True))
+
+    zoom_ratio      = float(config.get("visuals", {}).get("ken_burns_zoom_ratio", 1.15))
+    transition_dur  = float(config.get("visuals", {}).get("transition_duration", 0.15))
 
     logger.info(f"Assembling video from {len(scene_visuals)} scenes...")
 
-    # 1. Build video sequence with varied camera motion & smooth crossfades
-    transition_dur = float(config.get("visuals", {}).get("transition_duration", 0.4))
+    # ── 1. Build video clips ──────────────────────────────────────────────────
     video_clips = []
     num_scenes = len(scene_visuals)
     for idx, (vis_path, dur) in enumerate(zip(scene_visuals, scene_durations)):
-        # Extend non-final clips slightly by transition_dur so crossfade overlap preserves total duration
-        clip_dur = dur + transition_dur if (num_scenes > 1 and idx < num_scenes - 1 and dur > transition_dur) else dur
-        logger.info(f"Processing scene clip {idx+1}/{num_scenes}: {vis_path.name} (duration: {dur:.2f}s)")
-        clip = prepare_scene_visual(vis_path, clip_dur, scene_index=idx)
-        if idx > 0 and transition_dur > 0 and clip_dur > transition_dur:
-            clip = clip.crossfadein(transition_dur)
+        # card_text scene: vis_path is None; build a gradient text card instead
+        scene_obj = scenes[idx] if scenes else None
+        card_text = getattr(scene_obj, "card_text", None) if scene_obj else None
+
+        if card_text:
+            logger.info(f"Scene {idx+1}/{num_scenes}: text card [{card_text}]")
+            clip = make_text_card(card_text, dur)
+        else:
+            clip_dur = (
+                dur + transition_dur
+                if (num_scenes > 1 and idx < num_scenes - 1 and dur > transition_dur)
+                else dur
+            )
+            logger.info(f"Scene {idx+1}/{num_scenes}: {vis_path.name if vis_path else '?'} ({dur:.2f}s)")
+            clip = prepare_scene_visual(
+                vis_path, clip_dur,
+                scene_index=idx,
+                zoom_ratio=zoom_ratio,
+                punch=punch,
+                apply_grade=apply_grade,
+            )
+            if idx > 0 and transition_dur > 0 and clip_dur > transition_dur:
+                clip = clip.crossfadein(transition_dur)
+
         video_clips.append(clip)
 
     if num_scenes > 1 and transition_dur > 0:
@@ -216,61 +283,88 @@ def assemble_short(
     else:
         main_video = concatenate_videoclips(video_clips, method="compose")
 
-    # 2. Audio mixing (Voiceover + ducked background music)
-    voice_audio = AudioFileClip(str(voiceover_path))
+    # ── 2. Audio: voice + music + SFX ────────────────────────────────────────
+    voice_audio  = AudioFileClip(str(voiceover_path))
     audio_tracks = [voice_audio]
 
     bg_music_path = pick_background_music()
     if bg_music_path:
         music_vol = audio_cfg.get("music_volume", 0.12)
-        logger.info(f"Adding background music: {bg_music_path.name} (volume: {music_vol})")
+        logger.info(f"Background music: {bg_music_path.name} (vol={music_vol})")
         music_clip = AudioFileClip(str(bg_music_path))
-        # Loop music if needed
         if music_clip.duration < voice_audio.duration:
             from moviepy.audio.fx.all import audio_loop
             music_clip = audio_loop(music_clip, duration=voice_audio.duration)
         else:
             music_clip = music_clip.subclip(0, voice_audio.duration)
-        
         music_clip = volumex(music_clip, music_vol)
+        music_clip = audio_fadeout(audio_fadein(music_clip, 0.5), 1.5)
         audio_tracks.append(music_clip)
 
-    final_audio = CompositeAudioClip(audio_tracks)
-    main_video = main_video.set_audio(final_audio)
+    sfx = build_sfx_clips(scene_durations, sfx_volume=sfx_volume, sfx_every=sfx_every)
+    audio_tracks.extend(sfx)
 
-    # 3. Dynamic Captions Overlay
-    cap_cfg = config.get("captions", {})
+    main_video = main_video.set_audio(CompositeAudioClip(audio_tracks))
+
+    # ── 3. Overlay layers (hook + captions) ───────────────────────────────────
+    overlay_clips: List[Any] = []
+
+    hook_clip = make_hook_clip(hook_text, target_w, target_h)
+    if hook_clip is not None:
+        overlay_clips.append(hook_clip)
+
     caption_clips = create_caption_clips(
         word_timestamps=word_timestamps,
         total_duration=voice_audio.duration,
         words_per_batch=cap_cfg.get("words_per_batch", 3),
         width=target_w,
         height=target_h,
-        font_size=cap_cfg.get("font_size", 48),
+        font_size=cap_cfg.get("font_size", 92),
         highlight_color=cap_cfg.get("highlight_color", "#FFE600"),
         text_color=cap_cfg.get("color", "#FFFFFF"),
         stroke_color=cap_cfg.get("stroke_color", "#000000"),
-        stroke_width=cap_cfg.get("stroke_width", 2)
+        stroke_width=cap_cfg.get("stroke_width", 7),
+        y_frac=cap_cfg.get("y_frac", 0.62),
+        emphasis=emphasis,
+        emphasis_color=emph_color,
+        caption_pop=caption_pop,
     )
+    overlay_clips.extend(caption_clips)
 
-    if caption_clips:
-        logger.info(f"Burning {len(caption_clips)} caption frames into video...")
-        final_composite = CompositeVideoClip([main_video] + caption_clips, size=(target_w, target_h))
+    if overlay_clips:
+        logger.info(f"Compositing {len(overlay_clips)} overlay clip(s)...")
+        final_composite = CompositeVideoClip(
+            [main_video] + overlay_clips, size=(target_w, target_h)
+        )
     else:
         final_composite = main_video
 
     final_composite = final_composite.set_duration(voice_audio.duration)
 
-    logger.info(f"Rendering final short to {output_path} (preset='ultrafast' for CPU efficiency)...")
+    # ── 4. Render ─────────────────────────────────────────────────────────────
+    if draft:
+        final_composite = final_composite.resize((540, 960))
+        preset, crf = "ultrafast", 28
+    else:
+        preset = render_cfg.get("preset", "veryfast")
+        crf    = render_cfg.get("crf", 20)
+
+    logger.info(f"Rendering → {output_path} (preset={preset}, crf={crf})...")
     final_composite.write_videofile(
         str(output_path),
         fps=fps,
         codec="libx264",
         audio_codec="aac",
-        preset="ultrafast",
-        threads=4,
-        logger=None # MoviePy progress output
+        audio_bitrate="192k",
+        preset=preset,
+        threads=os.cpu_count(),
+        ffmpeg_params=["-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        logger="bar",
     )
 
-    logger.info(f"Short successfully created at: {output_path}")
+    for c in video_clips:
+        c.close()
+    voice_audio.close()
+
+    logger.info(f"Short saved: {output_path}")
     return output_path

@@ -1,132 +1,254 @@
 import numpy as np
 from pathlib import Path
-from moviepy.editor import (
-    VideoFileClip,
-    ImageClip,
-    CompositeVideoClip,
-    vfx
-)
-from src.utils import logger
+from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageEnhance
+from moviepy.editor import VideoFileClip, VideoClip, ImageClip, CompositeVideoClip, vfx
+
+from src.utils import logger, FONTS_DIR
 
 TARGET_WIDTH = 1080
 TARGET_HEIGHT = 1920
+MOTION_PRESETS = ["zoom_in", "pan_right", "zoom_out", "pan_left", "pan_up"]
+
+# ── Font cache (shared with assemble.py which imports _font_for_size) ─────────
+_FONTS: dict = {}
+
+
+def _font_for_size(size: int) -> ImageFont.FreeTypeFont:
+    """Loads Montserrat ExtraBold with graceful fallbacks; cached by size."""
+    if size not in _FONTS:
+        for p in (FONTS_DIR / "Montserrat-ExtraBold.ttf", "arialbd.ttf", "DejaVuSans-Bold.ttf"):
+            try:
+                _FONTS[size] = ImageFont.truetype(str(p), size)
+                break
+            except OSError:
+                continue
+        else:
+            _FONTS[size] = ImageFont.load_default()
+    return _FONTS[size]
+
+
+# ── Easing ────────────────────────────────────────────────────────────────────
+
+def _ease_out_back(x: float) -> float:
+    """Overshoot-and-settle easing (used for pop-in animations)."""
+    c1, c3 = 1.70158, 1.70158 + 1
+    return 1 + c3 * (x - 1) ** 3 + c1 * (x - 1) ** 2
+
+
+# ── Per-pixel effects ─────────────────────────────────────────────────────────
+
+def _apply_bottom_vignette(frame: np.ndarray) -> np.ndarray:
+    """Subtle bottom-gradient vignette so captions always pop."""
+    h = frame.shape[0]
+    y_grad = np.ones((h, 1, 1), dtype=np.float32)
+    start_y = int(h * 0.55)
+    y_grad[start_y:] = np.linspace(1.0, 0.52, h - start_y, dtype=np.float32).reshape(-1, 1, 1)
+    return (frame.astype(np.float32) * y_grad).astype(np.uint8)
+
+
+def grade(frame: np.ndarray) -> np.ndarray:
+    """Mild contrast + saturation boost so all clips share one look."""
+    f = frame.astype(np.float32)
+    f = (f - 128.0) * 1.08 + 128.0          # contrast
+    gray = f.mean(axis=2, keepdims=True)
+    f = gray + (f - gray) * 1.12            # saturation
+    return np.clip(f, 0, 255).astype(np.uint8)
+
+
+# ── Punch-in helper (stock video) ─────────────────────────────────────────────
+
+def punch_frame(frame: np.ndarray, t: float, punch: float = 0.07, dur: float = 0.25) -> np.ndarray:
+    """Zooms in slightly at t=0 and settles to 1× by t=dur (CPU-friendly crop)."""
+    k = 1.0 + punch * max(0.0, 1.0 - t / dur) ** 2
+    if k <= 1.001:
+        return frame
+    h, w = frame.shape[:2]
+    vw, vh = w / k, h / k
+    box = ((w - vw) / 2, (h - vh) / 2, (w + vw) / 2, (h + vh) / 2)
+    return np.asarray(
+        Image.fromarray(frame).resize((w, h), Image.Resampling.BILINEAR, box=box)
+    )
+
+
+# ── Image helpers ─────────────────────────────────────────────────────────────
 
 def crop_and_resize_to_vertical(clip, target_w: int = TARGET_WIDTH, target_h: int = TARGET_HEIGHT):
-    """
-    Crops and resizes an arbitrary aspect ratio clip/image to exact vertical 9:16 (1080x1920)
-    without black bars or distortion (center-crop).
-    """
+    """Center-crops and resizes a clip to exact vertical 9:16 (1080×1920)."""
     clip_w, clip_h = clip.size
     target_ratio = target_w / target_h
     current_ratio = clip_w / clip_h
 
     if current_ratio > target_ratio:
-        # Wider than target -> scale by height, crop width
         new_w = int(target_h * current_ratio)
         scaled = clip.resize((new_w, target_h))
         x_center = scaled.w / 2
-        final_clip = scaled.crop(
-            x1=int(x_center - target_w / 2),
-            y1=0,
-            x2=int(x_center + target_w / 2),
-            y2=target_h
+        return scaled.crop(
+            x1=int(x_center - target_w / 2), y1=0,
+            x2=int(x_center + target_w / 2), y2=target_h,
         )
     else:
-        # Taller than target -> scale by width, crop height
         new_h = int(target_w / current_ratio)
         scaled = clip.resize((target_w, new_h))
         y_center = scaled.h / 2
-        final_clip = scaled.crop(
-            x1=0,
-            y1=int(y_center - target_h / 2),
-            x2=target_w,
-            y2=int(y_center + target_h / 2)
+        return scaled.crop(
+            x1=0, y1=int(y_center - target_h / 2),
+            x2=target_w, y2=int(y_center + target_h / 2),
         )
-    return final_clip
-
-MOTION_PRESETS = ["zoom_in", "pan_right", "zoom_out", "pan_left", "pan_up"]
 
 
-def _apply_bottom_vignette(frame: np.ndarray) -> np.ndarray:
-    """Applies a subtle bottom gradient vignette so captions always pop."""
-    h, w = frame.shape[:2]
-    # Fade from 1.0 at 55% height down to 0.55 at bottom
-    y_grad = np.ones((h, 1, 1), dtype=np.float32)
-    start_y = int(h * 0.55)
-    ramp = np.linspace(1.0, 0.52, h - start_y, dtype=np.float32).reshape(-1, 1, 1)
-    y_grad[start_y:] = ramp
-    return (frame.astype(np.float32) * y_grad).astype(np.uint8)
+def fit_blur_bg(img: Image.Image, w: int, h: int) -> Image.Image:
+    """Landscape/square source: sharp image on a blurred darkened background."""
+    bg = ImageOps.fit(img, (w, h), Image.Resampling.BILINEAR).filter(ImageFilter.GaussianBlur(40))
+    bg = ImageEnhance.Brightness(bg).enhance(0.55)
+    fg = ImageOps.contain(img, (w, h), Image.Resampling.LANCZOS)
+    bg.paste(fg, ((w - fg.width) // 2, (h - fg.height) // 2))
+    return bg
 
+
+# ── Ken Burns (images) ────────────────────────────────────────────────────────
 
 def apply_ken_burns_effect(
     image_path: Path,
     duration: float,
-    zoom_ratio: float = 1.18,
-    motion_type: str = "zoom_in"
+    zoom_ratio: float = 1.15,
+    motion_type: str = "zoom_in",
+    punch: float = 0.07,
+    apply_grade: bool = True,
+) -> VideoClip:
+    """
+    Single float-box resize per frame: fast, sharp, no rounding jitter.
+    Punch-in: each scene starts slightly zoomed and settles in 0.25 s.
+    Grade: mild contrast/saturation boost for a consistent look.
+    """
+    img = Image.open(image_path).convert("RGB")
+    BW = int(TARGET_WIDTH * zoom_ratio)
+    BH = int(TARGET_HEIGHT * zoom_ratio)
+    base = (
+        fit_blur_bg(img, BW, BH)
+        if img.width / img.height > 0.75
+        else ImageOps.fit(img, (BW, BH), Image.Resampling.LANCZOS)
+    )
+    base_arr = _apply_bottom_vignette(np.asarray(base))
+    if apply_grade:
+        base_arr = grade(base_arr)
+    base = Image.fromarray(base_arr)
+
+    def make_frame(t: float) -> np.ndarray:
+        p = min(1.0, max(0.0, t / duration)) if duration > 0 else 0.0
+        e = 0.5 - 0.5 * float(np.cos(np.pi * p))  # ease in-out
+        s, fx, fy = zoom_ratio, 0.5, 0.5
+        if motion_type == "zoom_in":
+            s = 1.0 + (zoom_ratio - 1.0) * e
+        elif motion_type == "zoom_out":
+            s = zoom_ratio - (zoom_ratio - 1.0) * e
+        elif motion_type == "pan_right":
+            fx = 0.1 + 0.8 * e
+        elif motion_type == "pan_left":
+            fx = 0.9 - 0.8 * e
+        elif motion_type == "pan_up":
+            fy = 0.9 - 0.8 * e
+        # punch-in: extra zoom at the start of every scene
+        s *= 1.0 + punch * max(0.0, 1.0 - t / 0.25) ** 2
+        vw, vh = BW / s, BH / s
+        left = (BW - vw) * fx
+        top = (BH - vh) * fy
+        return np.asarray(
+            base.resize(
+                (TARGET_WIDTH, TARGET_HEIGHT),
+                Image.Resampling.BILINEAR,
+                box=(left, top, left + vw, top + vh),
+            )
+        )
+
+    return VideoClip(make_frame, duration=duration)
+
+
+# ── Full-screen text card (card_text scenes) ──────────────────────────────────
+
+def _gradient_bg(w: int, h: int, c1=(15, 12, 40), c2=(70, 30, 110)) -> np.ndarray:
+    """Vertical gradient from c1 (top) to c2 (bottom), shape (h, w, 3)."""
+    t = np.linspace(0, 1, h, dtype=np.float32).reshape(h, 1, 1)
+    arr = np.array(c1, dtype=np.float32) * (1 - t) + np.array(c2, dtype=np.float32) * t
+    return np.repeat(arr.astype(np.uint8), w, axis=1)
+
+
+def make_text_card(text: str, duration: float, w: int = TARGET_WIDTH, h: int = TARGET_HEIGHT) -> CompositeVideoClip:
+    """
+    Full-screen animated text card for numeric/key-phrase scenes.
+    Text pops in with overshoot easing in the first 0.3 s.
+    """
+    card_h = 700
+    img = Image.new("RGBA", (w, card_h), (0, 0, 0, 0))
+    d = ImageDraw.Draw(img)
+    upper = text.upper()
+    size = 220
+    while d.textlength(upper, font=_font_for_size(size)) > w - 120 and size > 70:
+        size -= 6
+    f = _font_for_size(size)
+    tw = d.textlength(upper, font=f)
+    d.text(
+        ((w - tw) / 2, (card_h - size) // 2),
+        upper,
+        font=f,
+        fill="#FFE600",
+        stroke_width=10,
+        stroke_fill="#000000",
+    )
+
+    bg = ImageClip(_gradient_bg(w, h)).set_duration(duration)
+    fg = (
+        ImageClip(np.array(img))
+        .set_duration(duration)
+        .resize(lambda t: max(0.05, _ease_out_back(min(1.0, t / 0.3))))
+        .set_position("center")
+    )
+    return CompositeVideoClip([bg, fg], size=(w, h))
+
+
+# ── Scene visual dispatcher ───────────────────────────────────────────────────
+
+def prepare_scene_visual(
+    visual_path: Path,
+    duration: float,
+    scene_index: int = 0,
+    zoom_ratio: float = 1.15,
+    punch: float = 0.07,
+    apply_grade: bool = True,
 ):
     """
-    Applies a smooth Ken Burns pan & zoom effect on a still image over the given duration.
-    Supports 'zoom_in', 'zoom_out', 'pan_left', 'pan_right', and 'pan_up'.
+    Returns a processed 1080×1920 MoviePy clip.
+    - Images  → Ken Burns with punch-in and optional grade.
+    - Videos  → FFmpeg-decoded, cropped to vertical, punch-in + grade applied.
+    - None    → should not reach here (card_text scenes are handled upstream).
     """
-    from PIL import Image
+    if visual_path is None:
+        raise ValueError("prepare_scene_visual received None; card_text scenes must be handled before calling this.")
 
-    base_clip = ImageClip(str(image_path)).set_duration(duration)
-    framed = crop_and_resize_to_vertical(base_clip)
-
-    # Pre-render the base 1080x1920 frame once and apply vignette for speed
-    base_frame = _apply_bottom_vignette(framed.get_frame(0))
-    base_pil = Image.fromarray(base_frame)
-
-    def animate_frame(t):
-        progress = min(1.0, max(0.0, t / duration)) if duration > 0 else 0.0
-        # Smooth ease-in-out
-        eased = 0.5 - 0.5 * float(np.cos(np.pi * progress))
-
-        if motion_type == "zoom_in":
-            scale = 1.0 + (zoom_ratio - 1.0) * eased
-            x_frac, y_frac = 0.5, 0.5
-        elif motion_type == "zoom_out":
-            scale = zoom_ratio - (zoom_ratio - 1.0) * eased
-            x_frac, y_frac = 0.5, 0.5
-        elif motion_type == "pan_right":
-            scale = zoom_ratio
-            x_frac, y_frac = 0.15 + 0.70 * eased, 0.5
-        elif motion_type == "pan_left":
-            scale = zoom_ratio
-            x_frac, y_frac = 0.85 - 0.70 * eased, 0.5
-        elif motion_type == "pan_up":
-            scale = zoom_ratio
-            x_frac, y_frac = 0.5, 0.85 - 0.70 * eased
-        else:
-            scale = 1.0 + (zoom_ratio - 1.0) * eased
-            x_frac, y_frac = 0.5, 0.5
-
-        w = max(TARGET_WIDTH, int(TARGET_WIDTH * scale))
-        h = max(TARGET_HEIGHT, int(TARGET_HEIGHT * scale))
-
-        resized = base_pil.resize((w, h), Image.Resampling.BILINEAR)
-        left = int((w - TARGET_WIDTH) * x_frac)
-        top = int((h - TARGET_HEIGHT) * y_frac)
-        cropped = resized.crop((left, top, left + TARGET_WIDTH, top + TARGET_HEIGHT))
-        return np.array(cropped)
-
-    return framed.fl(lambda gf, t: animate_frame(t))
-
-
-def prepare_scene_visual(visual_path: Path, duration: float, scene_index: int = 0):
-    """
-    Takes an image or video file path and returns a processed MoviePy clip
-    fitted to 1080x1920 with exact scene duration and varied camera motion.
-    """
-    suffix = visual_path.suffix.lower()
-    if suffix in [".jpg", ".jpeg", ".png", ".webp"]:
+    if visual_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
         motion = MOTION_PRESETS[scene_index % len(MOTION_PRESETS)]
-        return apply_ken_burns_effect(visual_path, duration, motion_type=motion)
-    else:
-        clip = VideoFileClip(str(visual_path))
-        if clip.duration < duration:
-            loop_factor = int(np.ceil(duration / clip.duration))
-            clip = vfx.loop(clip, n=loop_factor)
+        return apply_ken_burns_effect(
+            visual_path, duration,
+            zoom_ratio=zoom_ratio,
+            motion_type=motion,
+            punch=punch,
+            apply_grade=apply_grade,
+        )
 
-        clip = clip.subclip(0, duration)
-        return crop_and_resize_to_vertical(clip)
+    # Stock video path
+    clip = VideoFileClip(str(visual_path), target_resolution=(TARGET_HEIGHT, None))
+    if clip.duration < duration:
+        loop_factor = int(np.ceil(duration / clip.duration))
+        clip = vfx.loop(clip, n=loop_factor)
+    clip = clip.subclip(0, duration)
+    clip = crop_and_resize_to_vertical(clip)
+
+    if apply_grade:
+        clip = clip.fl_image(lambda f: grade(_apply_bottom_vignette(f)))
+    else:
+        clip = clip.fl_image(_apply_bottom_vignette)
+
+    # punch-in for video: use fl() so t is available
+    if punch > 0:
+        clip = clip.fl(lambda gf, t: punch_frame(gf(t), t, punch=punch))
+
+    return clip

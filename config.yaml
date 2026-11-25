@@ -1,0 +1,35 @@
+video:
+  width: 1080
+  height: 1920
+  fps: 30
+  target_duration_seconds: 45
+
+voice:
+  # Edge-TTS voice name. Examples:
+  # en-US-ChristopherNeural (Male energetic/deep)
+  # en-US-GuyNeural (Male natural)
+  # en-US-JennyNeural (Female clear/expressive)
+  # en-US-AriaNeural (Female lively)
+  # en-GB-SoniaNeural (British female)
+  name: "en-US-ChristopherNeural"
+  rate: "+0%"
+  pitch: "+0Hz"
+
+captions:
+  whisper_model: "base"       # options: tiny, base, small
+  compute_type: "int8"        # CPU-friendly int8 quantization
+  font: "Arial-Bold"
+  font_size: 48
+  color: "white"
+  highlight_color: "#FFE600" # Bright yellow active word highlight
+  stroke_color: "black"
+  stroke_width: 2
+  words_per_batch: 3          # 2 to 4 words visible at once for snappy Shorts rhythm
+
+audio:
+  music_volume: 0.12          # 12% background ducked volume
+  voice_volume: 1.0
+
+visuals:
+  ken_burns_zoom_ratio: 1.15
+  transition_duration: 0.4

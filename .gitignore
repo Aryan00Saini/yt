@@ -1,0 +1,26 @@
+# Environment & Secrets
+.env
+client_secret.json
+*.json.bak
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Cache & Generated Outputs
+cache/
+output/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+.pytest_cache/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

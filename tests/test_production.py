@@ -110,3 +110,25 @@ def test_review_edge_cases():
     assert "eerie" in music.music.moods and music.music.build and music.music.silence_before == ["twist"]
 
     assert _sentences("It was 8.5 degrees. Cold.") == ["It was 8.5 degrees.", "Cold."]
+
+
+def test_review_edge_cases_round2():
+    from src.production import _sentences
+
+    titled = "Title: Fun fact\nOctopuses have three hearts. Two pump blood to the gills."
+    assert not looks_like_production_script(titled)
+
+    one = "[Hook, 0-5s] Water boils at 100 degrees at sea level."
+    assert looks_like_production_script(one)
+    assert parse_production_script(one).narration == "Water boils at 100 degrees at sea level."
+
+    cold = parse_production_script("[Cold Open]\nNobody saw it coming.\n[Main, 4-30s] Then it happened.")
+    assert cold.narration.split() == "Nobody saw it coming. Then it happened.".split()
+
+    hyph = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nStory-driven games sold well.")
+    assert "Story-driven games sold well." in hyph.narration
+
+    snd = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nSound\n- Eerie folk track that builds\n- Whoosh at the start")
+    assert "eerie" in snd.music.moods and snd.music.build and any(c.sound == "whoosh" for c in snd.sfx)
+
+    assert _sentences("It was 8.5 degrees") == ["It was 8.5 degrees"]

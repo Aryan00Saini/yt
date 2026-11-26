@@ -5,6 +5,7 @@ Calling run_pipeline() is the single source of truth for the generation flow;
 both entry points delegate here so the logic is never duplicated.
 """
 
+import hashlib
 from pathlib import Path
 from typing import Callable, List, Optional
 from src.assemble import assemble_short, _clean
@@ -61,6 +62,8 @@ def run_pipeline(
         plan = parse_production_script(custom_body)
         topic = topic or plan.topic
     slug = slugify((plan.title if plan else None) or topic or custom_body[:40])
+    if plan:
+        slug = f"{slug[:50]}_{hashlib.sha1(custom_body.encode()).hexdigest()[:6]}"
 
     if draft:
         config["render"] = {"preset": "ultrafast", "crf": 28}

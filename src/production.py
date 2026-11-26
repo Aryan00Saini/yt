@@ -157,16 +157,27 @@ _TIMED_SECTION_RE = re.compile(
     rf"^(?P<name>[A-Za-z][A-Za-z0-9 '&/]{{0,24}}?)\s*[(\[]\s*{_TIMES}\s*[)\]]\s*:?\s*(?P<rest>.*)$", re.I)
 
 
+def _short_times(m) -> bool:
+    """Rejects year ranges like (1939–1945) that look like section timings."""
+    return not m.group("a") or all((_secs(m.group(k)) or 0) <= 600 for k in ("a", "b"))
+
+
 def _match_section(line: str, mode: Optional[str], strict: bool = False):
+    meta = mode in ("overlays", "audio", "visuals", "sources", "factcheck")
     m = _SECTION_RE.match(line)
-    if m and (not strict or m.group("a") or re.fullmatch(_KNOWN_SECTIONS, m.group("name").strip(), flags=re.I)):
+    if m and re.match(r"\((?:https?://|www\.|\.{0,2}/|#)", m.group("rest")):  # Markdown link
+        return None
+    known = m and re.fullmatch(_KNOWN_SECTIONS, m.group("name").strip(), flags=re.I)
+    if m and _short_times(m) and (not (strict or meta) or m.group("a") or known):
         return m
-    if m or mode in ("overlays", "audio", "visuals", "sources", "factcheck"):
+    if m or meta:
         return None
     m = _NAMED_SECTION_RE.match(line)
-    if m and (m.group("a") or not m.group("rest") or re.match(r"^[:.–—-](?:\s|$)", line[len(m.group("name")):].lstrip() or ":")):
+    if m and _short_times(m) and (m.group("a") or not m.group("rest") or re.match(
+            r"^(?::|[.–—-](?:\s|$))", line[len(m.group("name")):].lstrip() or ":")):
         return m
-    return _TIMED_SECTION_RE.match(line)
+    m = _TIMED_SECTION_RE.match(line)
+    return m if m and _short_times(m) else None
 
 
 _TIME_RANGE_RE = re.compile(
@@ -221,7 +232,7 @@ def looks_like_production_script(text: str) -> bool:
     if kinds & {"overlays", "audio", "visuals"}:
         return True
     has_title = any(re.match(r"^(?:video\s+)?title\s*:", l, flags=re.I) for l in lines)
-    return bool(sections) and bool(kinds & {"script", "sources", "factcheck"} or has_title)
+    return bool(sections or "script" in kinds) and bool(kinds & {"script", "sources", "factcheck"} or has_title)
 
 
 def _spoken(line: str) -> str:
@@ -265,9 +276,9 @@ def parse_production_script(text: str) -> ProductionPlan:
         if kind:
             mode = kind
             if kind == "audio":
-                is_music = re.search(r"music|soundtrack|score", line, flags=re.I)
+                is_music = re.search(r"(?<!\bno )(?<!\bwithout )(?:music|soundtrack|score)", line, flags=re.I)
                 is_sfx = re.search(r"sfx|effect", line, flags=re.I)
-                ambiguous = re.search(r"\bsound\b(?!\s*effect)|audio", line, flags=re.I)
+                ambiguous = re.search(r"\bsound\b(?!\s*effect)", line, flags=re.I)
                 audio_default = None if ambiguous else "Music" if is_music and not is_sfx else "SFX" if is_sfx and not is_music else None
             continue
 
@@ -504,7 +515,7 @@ def parse_visuals(text: str) -> VisualPlan:
 # ── Scene splitting ───────────────────────────────────────────────────────────
 
 def _sentences(text: str) -> List[str]:
-    return [s.strip() for s in re.findall(r"(?:[^.!?]|\.(?=\d))*[.!?]+(?!\d)[\"”’']*|(?:[^.!?]|\.(?=\d))+$", text) if s.strip()]
+    return [s.strip() for s in re.findall(r"(?:[^.!?]|\.(?=\d))*[.!?]*(?:[!?]|\.(?!\d))[\"”’']*|(?:[^.!?]|\.(?=\d))+$", text) if s.strip()]
 
 
 def split_into_scenes(plan: ProductionPlan, min_words: int = 6, max_words: int = 15) -> List[Tuple[int, str]]:

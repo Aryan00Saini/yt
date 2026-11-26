@@ -132,3 +132,37 @@ def test_review_edge_cases_round2():
     assert "eerie" in snd.music.moods and snd.music.build and any(c.sound == "whoosh" for c in snd.sfx)
 
     assert _sentences("It was 8.5 degrees") == ["It was 8.5 degrees"]
+
+
+def test_review_edge_cases_round3():
+    from src.production import _sentences
+
+    assert not looks_like_production_script("World War II (1939–1945) changed the world.")
+
+    md = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nSources\n[Britannica](https://britannica.com/x)\n- Some book")
+    assert "britannica" not in md.narration.lower() and len(md.sources) == 2
+
+    titled = "Title: Ocean facts\nScript\nThe ocean is deep.\nSources\n- NOAA"
+    assert looks_like_production_script(titled)
+    assert parse_production_script(titled).narration == "The ocean is deep."
+
+    compact = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nScene 3:Survivors were rescued.")
+    assert "Scene 3" not in compact.narration
+
+    mus = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nMusic (background audio)\n- Soft piano that swells")
+    assert mus.music.build and mus.music.description
+
+    assert _sentences("When did it sink?1912 was the year.") == ["When did it sink?", "1912 was the year."]
+    assert _sentences("It was 8.5 degrees") == ["It was 8.5 degrees"]
+
+    cue = parse_production_script("[Cold Open] (pause) Nobody saw it coming.\n[Main, 4-30s] Then it happened.")
+    assert "Nobody saw it coming." in cue.narration
+
+    nomusic = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nAudio (no music)\n- Whoosh at the start")
+    assert any(c.sound == "whoosh" for c in nomusic.sfx)
+
+    rel = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nSources\n[Story](./archive/story.md)\n- Some book")
+    assert "archive" not in rel.narration and len(rel.sources) == 2
+
+    piano = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nAudio (piano music)\n- Soft piano that swells")
+    assert piano.music.build and piano.music.description

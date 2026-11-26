@@ -1,3 +1,4 @@
+from typing import Optional
 import numpy as np
 from pathlib import Path
 from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageFilter, ImageEnhance
@@ -53,6 +54,30 @@ def grade(frame: np.ndarray) -> np.ndarray:
     gray = f.mean(axis=2, keepdims=True)
     f = gray + (f - gray) * 1.12            # saturation
     return np.clip(f, 0, 255).astype(np.uint8)
+
+
+def sepia(frame: np.ndarray) -> np.ndarray:
+    """Aged-paper tone for woodcut / engraving / vintage styles."""
+    f = frame.astype(np.float32)
+    gray = f @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    gray = (gray - 128.0) * 1.15 + 128.0
+    tone = np.stack([gray * 1.07 + 18, gray * 0.95 + 8, gray * 0.78 - 4], axis=-1)
+    return np.clip(tone, 0, 255).astype(np.uint8)
+
+
+def mono(frame: np.ndarray) -> np.ndarray:
+    gray = frame.astype(np.float32) @ np.array([0.299, 0.587, 0.114], dtype=np.float32)
+    gray = (gray - 128.0) * 1.2 + 128.0
+    return np.repeat(np.clip(gray, 0, 255).astype(np.uint8)[..., None], 3, axis=-1)
+
+
+def look_filter(look: str = "default", apply_grade: bool = True):
+    """Returns the per-frame colour treatment for a visual look."""
+    if look == "sepia":
+        return sepia
+    if look == "mono":
+        return mono
+    return grade if apply_grade else (lambda f: f)
 
 
 # ── Punch-in helper (stock video) ─────────────────────────────────────────────
@@ -114,6 +139,7 @@ def apply_ken_burns_effect(
     motion_type: str = "zoom_in",
     punch: float = 0.07,
     apply_grade: bool = True,
+    look: str = "default",
 ) -> VideoClip:
     """
     Single float-box resize per frame: fast, sharp, no rounding jitter.
@@ -128,9 +154,7 @@ def apply_ken_burns_effect(
         if img.width / img.height > 0.75
         else ImageOps.fit(img, (BW, BH), Image.Resampling.LANCZOS)
     )
-    base_arr = _apply_bottom_vignette(np.asarray(base))
-    if apply_grade:
-        base_arr = grade(base_arr)
+    base_arr = look_filter(look, apply_grade)(_apply_bottom_vignette(np.asarray(base)))
     base = Image.fromarray(base_arr)
 
     def make_frame(t: float) -> np.ndarray:
@@ -214,6 +238,8 @@ def prepare_scene_visual(
     zoom_ratio: float = 1.15,
     punch: float = 0.07,
     apply_grade: bool = True,
+    look: str = "default",
+    motion: Optional[str] = None,
 ):
     """
     Returns a processed 1080×1920 MoviePy clip.
@@ -225,13 +251,14 @@ def prepare_scene_visual(
         raise ValueError("prepare_scene_visual received None; card_text scenes must be handled before calling this.")
 
     if visual_path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
-        motion = MOTION_PRESETS[scene_index % len(MOTION_PRESETS)]
+        motion = motion or MOTION_PRESETS[scene_index % len(MOTION_PRESETS)]
         return apply_ken_burns_effect(
             visual_path, duration,
             zoom_ratio=zoom_ratio,
             motion_type=motion,
             punch=punch,
             apply_grade=apply_grade,
+            look=look,
         )
 
     # Stock video path
@@ -242,10 +269,8 @@ def prepare_scene_visual(
     clip = clip.subclip(0, duration)
     clip = crop_and_resize_to_vertical(clip)
 
-    if apply_grade:
-        clip = clip.fl_image(lambda f: grade(_apply_bottom_vignette(f)))
-    else:
-        clip = clip.fl_image(_apply_bottom_vignette)
+    treat = look_filter(look, apply_grade)
+    clip = clip.fl_image(lambda f: treat(_apply_bottom_vignette(f)))
 
     # punch-in for video: use fl() so t is available
     if punch > 0:

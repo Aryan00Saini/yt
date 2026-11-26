@@ -286,3 +286,133 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
 
     logger.info("Structuring custom script offline...")
     return _split_custom_script_offline(script_text, title=title)
+
+
+# ── Production scripts (full briefs with sections, overlays, music, SFX) ─────
+
+class SceneVisuals(BaseModel):
+    visual_keywords: List[str]
+    image_prompt: str
+
+
+class PlanVisuals(BaseModel):
+    scenes: List[SceneVisuals]
+    tags: List[str] = Field(default_factory=list)
+
+
+PLAN_VISUALS_PROMPT = """You are the art director of a faceless YouTube Short about: {topic}
+Visual style for EVERY scene: {style}
+Director's visual notes: {notes}
+
+For each numbered narration line below, write:
+- visual_keywords: 2-4 literal, filmable search terms (most specific first).
+- image_prompt: one sentence describing a single still image for that line, in the visual style above, period-accurate, one clear subject, no text in the image. Use the director's notes on the lines they fit.
+Also return 5-8 tags.
+Return exactly {n} scenes, in order.
+
+{lines}
+"""
+
+
+def _llm_json(prompt: str, model_cls, temperature: float = 0.4):
+    gemini_key, groq_key = os.getenv("GEMINI_API_KEY"), os.getenv("GROQ_API_KEY")
+    if gemini_key:
+        try:
+            from google import genai
+            from google.genai import types
+            resp = genai.Client(api_key=gemini_key).models.generate_content(
+                model="gemini-2.5-flash", contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json", response_schema=model_cls, temperature=temperature),
+            )
+            return resp.parsed
+        except Exception as e:
+            logger.warning(f"Gemini request failed: {e}")
+    if groq_key:
+        try:
+            import requests
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={"Authorization": f"Bearer {groq_key}", "Content-Type": "application/json"},
+                json={
+                    "model": "llama-3.3-70b-versatile",
+                    "messages": [
+                        {"role": "system", "content": f"Output valid JSON matching this schema: {json.dumps(model_cls.model_json_schema())}"},
+                        {"role": "user", "content": prompt},
+                    ],
+                    "response_format": {"type": "json_object"},
+                    "temperature": temperature,
+                },
+                timeout=40,
+            )
+            resp.raise_for_status()
+            return model_cls.model_validate(json.loads(clean_json_response(resp.json()["choices"][0]["message"]["content"])))
+        except Exception as e:
+            logger.warning(f"Groq request failed: {e}")
+    return None
+
+
+_STOP = {"the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "is", "are", "was",
+         "were", "it", "this", "that", "you", "your", "they", "their", "what", "how", "why", "when", "if", "can",
+         "will", "just", "had", "have", "she", "her", "him", "his", "some", "into", "even", "still", "about", "could"}
+
+
+def _content_words(text: str) -> List[str]:
+    return [w for w in (t.strip(".,!?;:\"'()[]{}“”‘’").lower() for t in text.split()) if len(w) > 3 and w not in _STOP]
+
+
+def _offline_plan_visuals(plan, narrations: List[str], sections: List[int]) -> List[SceneVisuals]:
+    topic = plan.topic or plan.title
+    suggestion_for: dict = {}
+    for sug in plan.visuals.suggestions:
+        sug_words = {w[:5] for w in _content_words(sug)}
+        best = max(range(len(narrations)), key=lambda i: len(sug_words & {w[:5] for w in _content_words(narrations[i])}))
+        if not sug_words & {w[:5] for w in _content_words(narrations[best])}:
+            m = re.search(r"\bfor\s+(?:the\s+)?(\w+)", sug.lower())
+            idx = plan.section_index(m.group(1)) if m else None
+            if idx is None:
+                continue
+            best = next((i for i, s in enumerate(sections) if s == idx and i not in suggestion_for), None)
+            if best is None:
+                continue
+        suggestion_for.setdefault(best, re.sub(r"\bfor\s+the\s+\w+$", "", sug).strip())
+    out = []
+    for i, text in enumerate(narrations):
+        kws = _content_words(text)[:3] + _content_words(topic)[:1]
+        subject = suggestion_for.get(i) or text.rstrip(".!?")
+        out.append(SceneVisuals(visual_keywords=kws or [topic], image_prompt=f"{subject}, scene from {topic}"))
+    return out
+
+
+def generate_script_from_plan(plan) -> ShortScript:
+    """Builds the ShortScript for a parsed ProductionPlan; narration stays word-for-word."""
+    from src.production import split_into_scenes
+
+    pairs = split_into_scenes(plan)
+    plan.scene_sections = [si for si, _ in pairs]
+    narrations = [t for _, t in pairs]
+    style = plan.visuals.style or "cinematic, photorealistic"
+
+    visuals = None
+    tags: List[str] = []
+    prompt = PLAN_VISUALS_PROMPT.format(
+        topic=plan.topic, style=style, notes="; ".join(plan.visuals.suggestions) or "none",
+        n=len(narrations), lines="\n".join(f"{i + 1}. {t}" for i, t in enumerate(narrations)),
+    )
+    result = _llm_json(prompt, PlanVisuals)
+    if result and len(result.scenes) == len(narrations):
+        visuals, tags = result.scenes, result.tags
+    else:
+        if result:
+            logger.warning("LLM returned the wrong number of scenes; using offline visual prompts")
+        visuals = _offline_plan_visuals(plan, narrations, plan.scene_sections)
+
+    if not tags:
+        tags = list(dict.fromkeys(_content_words(plan.topic) + ["shorts", "history"]))[:8]
+    return ShortScript(
+        title=(plan.title or plan.topic)[:100],
+        description=plan.description(),
+        tags=tags,
+        scenes=[Scene(narration=t, visual_keywords=v.visual_keywords, image_prompt=v.image_prompt)
+                for t, v in zip(narrations, visuals)],
+    )

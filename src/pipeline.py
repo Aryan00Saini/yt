@@ -12,8 +12,9 @@ from src.utils import load_config, slugify, OUTPUT_DIR, CACHE_DIR, logger
 from src.script_gen import generate_script, generate_script_from_custom_text
 from src.tts import generate_voiceover_with_timing
 from src.captions import transcribe_with_whisper
-from src.visuals import fetch_all_visuals
-
+from src.visuals import fetch_all_visuals, make_map_card, search_reference_image
+from src.production import looks_like_production_script, parse_production_script, resolve_timing
+from src.script_gen import generate_script_from_plan
 
 
 def run_pipeline(
@@ -55,6 +56,10 @@ def run_pipeline(
     voice = voice or v.get("name", "en-US-AndrewNeural")
     rate = v.get("rate", "+8%")
     pitch = v.get("pitch", "+0Hz")
+    plan = None
+    if custom_body and looks_like_production_script(custom_body):
+        plan = parse_production_script(custom_body)
+        topic = topic or plan.topic
     slug = slugify(topic or custom_body[:40])
 
     if draft:
@@ -62,7 +67,11 @@ def run_pipeline(
 
     # ── Step 1: Script ────────────────────────────────────────────────────────
     progress("Step 1/4: Preparing script...")
-    if custom_body:
+    if plan:
+        progress(f"  Production script: {len(plan.sections)} sections, {len(plan.overlays)} on-screen texts, "
+                 f"{len(plan.sfx)} SFX cues, style: {plan.visuals.style or 'default'}")
+        script = generate_script_from_plan(plan)
+    elif custom_body:
         script = generate_script_from_custom_text(custom_body, title=topic)
     else:
         script = generate_script(
@@ -90,17 +99,27 @@ def run_pipeline(
 
     # ── Step 3: Visuals ───────────────────────────────────────────────────────
     progress("Step 3/4: Fetching visuals...")
-    overrides = list(media_files or [])
-    # Scenes with card_text don't need a downloaded visual; pass None as override
-    card_overrides = [
-        None if getattr(s, "card_text", None) else (overrides[i] if i < len(overrides) else None)
-        for i, s in enumerate(script.scenes)
-    ]
+    overrides: List[Optional[Path]] = list(media_files or [])
+    overrides += [None] * (len(script.scenes) - len(overrides))
+    skip = {i for i, s in enumerate(script.scenes) if getattr(s, "card_text", None)}
+    if plan:
+        if plan.visuals.references and overrides[0] is None:
+            overrides[0] = search_reference_image(plan.visuals.references[0], plan.topic)
+        if plan.visuals.map_place:
+            place = plan.visuals.map_place.lower()
+            idx = next((i for i, s in enumerate(script.scenes) if place in s.narration.lower()),
+                       plan.scene_sections.index(1) if 1 in plan.scene_sections else None)
+            if idx is not None and overrides[idx] is None:
+                overrides[idx] = make_map_card(plan.visuals.map_place)
     visuals = fetch_all_visuals(
         script,
         scene_durations,
-        overrides=card_overrides,
+        overrides=overrides,
+        skip=skip,
         max_workers=vis_cfg.get("max_download_workers", 4),
+        style_suffix=plan.visuals.style_suffix if plan else None,
+        prefer_images=bool(plan and plan.visuals.illustrative),
+        context=plan.search_context if plan else "",
     )
 
     # ── Step 4: Assembly ──────────────────────────────────────────────────────
@@ -109,9 +128,13 @@ def run_pipeline(
 
     # Build the global emphasis word set from all scenes
     emph = frozenset(_clean(w) for s in script.scenes for w in s.emphasis)
+    if plan:
+        resolve_timing(plan, scene_durations, words)
+        for ov in plan.overlays:
+            progress(f"  On-screen text {ov.start:5.2f}-{ov.end:5.2f}s: {ov.text}")
     assemble_short(
         scene_visuals=visuals, scene_durations=scene_durations,
         voiceover_path=audio_path, word_timestamps=words, output_path=out, config=config,
-        draft=draft, hook_text=script.hook_text, emphasis=emph, scenes=script.scenes)
+        draft=draft, hook_text=script.hook_text, emphasis=emph, scenes=script.scenes, plan=plan)
 
     return out, script

@@ -160,3 +160,9 @@ def test_review_edge_cases_round3():
 
     nomusic = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nAudio (no music)\n- Whoosh at the start")
     assert any(c.sound == "whoosh" for c in nomusic.sfx)
+
+    rel = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nSources\n[Story](./archive/story.md)\n- Some book")
+    assert "archive" not in rel.narration and len(rel.sources) == 2
+
+    piano = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nAudio (piano music)\n- Soft piano that swells")
+    assert piano.music.build and piano.music.description

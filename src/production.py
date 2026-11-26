@@ -165,7 +165,7 @@ def _short_times(m) -> bool:
 def _match_section(line: str, mode: Optional[str], strict: bool = False):
     meta = mode in ("overlays", "audio", "visuals", "sources", "factcheck")
     m = _SECTION_RE.match(line)
-    if m and re.match(r"\((?:https?://|www\.|/)", m.group("rest")):  # Markdown link
+    if m and re.match(r"\((?:https?://|www\.|\.{0,2}/|#)", m.group("rest")):  # Markdown link
         return None
     known = m and re.fullmatch(_KNOWN_SECTIONS, m.group("name").strip(), flags=re.I)
     if m and _short_times(m) and (not (strict or meta) or m.group("a") or known):
@@ -276,7 +276,7 @@ def parse_production_script(text: str) -> ProductionPlan:
         if kind:
             mode = kind
             if kind == "audio":
-                is_music = re.search(r"(?<!no )(?<!without )(?:music|soundtrack|score)", line, flags=re.I)
+                is_music = re.search(r"(?<!\bno )(?<!\bwithout )(?:music|soundtrack|score)", line, flags=re.I)
                 is_sfx = re.search(r"sfx|effect", line, flags=re.I)
                 ambiguous = re.search(r"\bsound\b(?!\s*effect)", line, flags=re.I)
                 audio_default = None if ambiguous else "Music" if is_music and not is_sfx else "SFX" if is_sfx and not is_music else None

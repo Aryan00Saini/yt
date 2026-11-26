@@ -13,7 +13,7 @@ from pathlib import Path
 
 DEST = Path("assets/fonts/Montserrat-ExtraBold.ttf")
 # Google Fonts API zip for Montserrat (all weights)
-URL = "https://fonts.google.com/download?family=Montserrat"
+URL = "https://github.com/JulietaUla/Montserrat/raw/master/fonts/ttf/Montserrat-ExtraBold.ttf"
 TARGET_NAME = "static/Montserrat-ExtraBold.ttf"
 
 print(f"Downloading Montserrat family zip from Google Fonts...")

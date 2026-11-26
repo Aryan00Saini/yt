@@ -4,10 +4,8 @@ from pathlib import Path
 from typing import FrozenSet, List, Dict, Any, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from moviepy.editor import ColorClip     
-
-
 from moviepy.editor import (
+    ColorClip,
     AudioFileClip,
     CompositeAudioClip,
     concatenate_videoclips,
@@ -16,7 +14,9 @@ from moviepy.editor import (
 )
 from moviepy.audio.fx.all import volumex, audio_fadein, audio_fadeout
 
-from src.utils import logger, MUSIC_DIR, FONTS_DIR, ASSETS_DIR
+from src.utils import logger, MUSIC_DIR, ASSETS_DIR
+from src.overlays import create_overlay_clips
+from src.sound import apply_gain, envelope, pick_music, sfx_path
 from src.animate import (
     prepare_scene_visual,
     make_text_card,
@@ -210,6 +210,44 @@ def build_sfx_clips(
     return clips
 
 
+# ── Production-script audio (music envelope + phrase-anchored SFX) ───────────
+
+def _music_breakpoints(plan, total: float) -> List[tuple]:
+    pts = [(0.0, 0.0), (0.5, 0.8 if plan.music.build else 1.0)]
+    if plan.music.build:
+        mains = [s for s in plan.sections if s.name.lower() in ("main", "body", "story", "middle")]
+        peak_t = mains[-1].act_end if mains else max(0.6, total - 1.5)
+        pts += [(peak_t, 1.35), (min(total, peak_t + 0.01), 1.0)]
+    pts += [(max(pts[-1][0] + 0.01, total - 1.5), 1.0), (total, 0.0)]
+    return pts
+
+
+def build_plan_audio(plan, total: float, sfx_master: float = 0.6) -> List[Any]:
+    clips: List[Any] = []
+    for cue in plan.sfx:
+        path = sfx_path(cue.sound)
+        if path is None:
+            continue
+        vol = cue.volume * sfx_master
+        for start, end in cue.times:
+            try:
+                clip = AudioFileClip(str(path))
+                if cue.mode == "bed" and end > start:
+                    from moviepy.audio.fx.all import audio_loop
+                    span = end - start
+                    clip = audio_loop(clip, duration=span)
+                    ramp = [(start, 0.0), (start + 0.4, 0.6 if plan.music.build else 1.0),
+                            (max(start + 0.41, end - 0.4), 1.3 if plan.music.build else 1.0), (end, 0.0)]
+                    clip = apply_gain(volumex(clip, vol), envelope(ramp, plan.music.silences), offset=start)
+                else:
+                    clip = volumex(clip, vol)
+                clips.append(clip.set_start(start))
+                logger.info(f"SFX {cue.sound} ({cue.mode}) at {start:.2f}s" + (f"-{end:.2f}s" if end else ""))
+            except Exception as e:
+                logger.warning(f"Could not add SFX {cue.sound}: {e}")
+    return clips
+
+
 # ── Main assembler ─────────────────────────────────────────────────────────────
 
 def assemble_short(
@@ -223,6 +261,7 @@ def assemble_short(
     hook_text: str = "",
     emphasis: FrozenSet[str] = frozenset(),
     scenes: Optional[list] = None,       # list of Scene objects for card_text detection
+    plan=None,                           # resolved ProductionPlan (overlays, music, SFX, look)
 ) -> Path:
     """Combines scene visuals, voiceover, captions, music, SFX, and overlays into the final MP4."""
     output_path = Path(output_path)
@@ -245,6 +284,7 @@ def assemble_short(
     sfx_every    = int(fx_cfg.get("sfx_every", 2))
     apply_grade  = bool(fx_cfg.get("grade", True))
 
+    look = plan.visuals.look if plan else "default"
     zoom_ratio      = float(config.get("visuals", {}).get("ken_burns_zoom_ratio", 1.15))
     transition_dur  = float(config.get("visuals", {}).get("transition_duration", 0.15))
 
@@ -272,8 +312,10 @@ def assemble_short(
             else:
                 last_good = vis_path
                 logger.info(f"Scene {idx+1}/{num_scenes}: {vis_path.name} ({dur:.2f}s)")
+                motion = "zoom_in" if vis_path.stem.startswith("map_") else None
                 clip = prepare_scene_visual(vis_path, clip_dur, scene_index=idx,
-                                            zoom_ratio=zoom_ratio, punch=punch, apply_grade=apply_grade)
+                                            zoom_ratio=zoom_ratio, punch=punch, apply_grade=apply_grade,
+                                            look=look, motion=motion)
 
         if idx > 0 and transition_dur > 0 and clip_dur > transition_dur:
             clip = clip.crossfadein(transition_dur)                # now applies to cards too
@@ -288,7 +330,7 @@ def assemble_short(
     voice_audio  = AudioFileClip(str(voiceover_path))
     audio_tracks = [voice_audio]
 
-    bg_music_path = pick_background_music()
+    bg_music_path = pick_music(plan.music.moods) if plan else pick_background_music()
     if bg_music_path:
         music_vol = audio_cfg.get("music_volume", 0.12)
         logger.info(f"Background music: {bg_music_path.name} (vol={music_vol})")
@@ -299,10 +341,17 @@ def assemble_short(
         else:
             music_clip = music_clip.subclip(0, voice_audio.duration)
         music_clip = volumex(music_clip, music_vol)
-        music_clip = audio_fadeout(audio_fadein(music_clip, 0.5), 1.5)
+        if plan:
+            gain = envelope(_music_breakpoints(plan, voice_audio.duration), plan.music.silences)
+            music_clip = apply_gain(music_clip, gain)
+        else:
+            music_clip = audio_fadeout(audio_fadein(music_clip, 0.5), 1.5)
         audio_tracks.append(music_clip)
 
-    sfx = build_sfx_clips(scene_durations, sfx_volume=sfx_volume, sfx_every=sfx_every)
+    if plan:
+        sfx = build_plan_audio(plan, voice_audio.duration, float(fx_cfg.get("sfx_master", 0.6)))
+    else:
+        sfx = build_sfx_clips(scene_durations, sfx_volume=sfx_volume, sfx_every=sfx_every)
     audio_tracks.extend(sfx)
 
     main_video = main_video.set_audio(CompositeAudioClip(audio_tracks))
@@ -310,9 +359,12 @@ def assemble_short(
     # ── 3. Overlay layers (hook + captions) ───────────────────────────────────
     overlay_clips: List[Any] = []
 
-    hook_clip = make_hook_clip(hook_text, target_w, target_h)
-    if hook_clip is not None:
-        overlay_clips.append(hook_clip)
+    if plan and plan.overlays:
+        overlay_clips.extend(create_overlay_clips(plan.overlays, target_w, target_h, look=look))
+    else:
+        hook_clip = make_hook_clip(hook_text, target_w, target_h)
+        if hook_clip is not None:
+            overlay_clips.append(hook_clip)
 
     caption_clips = create_caption_clips(
         word_timestamps=word_timestamps,

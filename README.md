@@ -63,6 +63,7 @@ python --version
    - `GEMINI_API_KEY`: Free key from [Google AI Studio](https://aistudio.google.com/)
    - `PEXELS_API_KEY`: Free API key from [Pexels](https://www.pexels.com/api/)
    - `PIXABAY_API_KEY`: Free API key from [Pixabay](https://pixabay.com/api/docs/) (optional fallback)
+   - `POLLINATIONS_API_KEY`: Key from [Pollinations](https://enter.pollinations.ai/keys) (optional). Without it, the free tier allows about 1 AI image every 45 seconds, so most scenes fall back to Wikimedia Commons images.
 
 *(Note: If no API keys are provided, the pipeline gracefully falls back to built-in script templates, free Pollinations.ai imagery, and procedural visual backdrops!)*
 
@@ -84,6 +85,29 @@ Options:
 
 The final MP4 will be rendered to:
 `output/<topic_slug>.mp4`
+
+### Production briefs (script + on-screen text + music + SFX + visuals)
+`--script-file` (or the "Use My Own Script" box in the UI) also accepts a full production brief. See
+[`examples/dancing_plague.txt`](examples/dancing_plague.txt) and [`examples/titanic_baker.md`](examples/titanic_baker.md).
+
+```powershell
+python main.py --script-file examples/dancing_plague.txt --draft
+```
+
+What the brief can contain (headings are matched loosely; Markdown `#`/`**` is fine):
+
+| Part | Example | What happens |
+|------|---------|--------------|
+| `Title:` / `Video Title:` | `Title: He Survived the Titanic Drunk 🥃` | YouTube title |
+| Timed sections | `[Hook, 0-5s] ...`, `Hook (0-4s): ...`, `Scene 2: ...` | Only these lines are spoken. Times are estimates. |
+| `On-Screen Text` | `- "400 PEOPLE IN ONE MONTH" (16-21s)` | Text boxes (emoji supported), pinned to the matching spoken words |
+| `Music` | `eerie medieval folk that gets faster... silence before the twist` | Track picked by mood from `assets/music/<mood>/` or a file named after the mood; builds and silent beats are applied |
+| `SFX` | `record scratch at "More dancing", heartbeat at the ending question` | Sounds placed on the quoted phrase, section, final question, or under the main section. Built-in sounds are generated; files in `assets/sfx/<name>.wav` replace them |
+| `Visual Suggestions` / `Visual Style` | `Medieval woodcut style... map pin on Strasbourg` | Style added to every AI image, sepia/B&W grade, named artworks pulled from Wikimedia, OpenStreetMap pin card |
+| `Sources` | `- Encyclopaedia Britannica, ...` | Added to the video description (never spoken) |
+
+The video length follows the spoken narration, so a 30-60 second script gives a 30-60 second Short.
+Fact-check notes and other headings are ignored for narration.
 
 ### 2. Streamlit Web UI
 Run the interactive dashboard:

@@ -45,8 +45,9 @@ topic = st.text_input(
 custom_script = ""
 if mode == "Use My Own Script":
     custom_script = st.text_area(
-        "Paste Your Script (separate scenes with blank lines, or paste a full paragraph):",
-        height=180,
+        "Paste Your Script: plain narration, or a full brief with sections like "
+        "[Hook, 0-5s], On-Screen Text, Music & SFX, Visual Suggestions and Sources:",
+        height=320,
         placeholder=(
             "What if I told you a single teaspoon of a neutron star weighs "
             "as much as Mount Everest?\n\n..."

@@ -4,6 +4,8 @@ from pathlib import Path
 from typing import FrozenSet, List, Dict, Any, Optional
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from moviepy.editor import ColorClip     
+
 
 from moviepy.editor import (
     AudioFileClip,
@@ -251,31 +253,30 @@ def assemble_short(
     # ── 1. Build video clips ──────────────────────────────────────────────────
     video_clips = []
     num_scenes = len(scene_visuals)
+    last_good = None
     for idx, (vis_path, dur) in enumerate(zip(scene_visuals, scene_durations)):
-        # card_text scene: vis_path is None; build a gradient text card instead
-        scene_obj = scenes[idx] if scenes else None
+        scene_obj = scenes[idx] if scenes and idx < len(scenes) else None
         card_text = getattr(scene_obj, "card_text", None) if scene_obj else None
+        clip_dur = (dur + transition_dur
+                    if (num_scenes > 1 and idx < num_scenes - 1 and dur > transition_dur) else dur)
 
         if card_text:
             logger.info(f"Scene {idx+1}/{num_scenes}: text card [{card_text}]")
-            clip = make_text_card(card_text, dur)
+            clip = make_text_card(card_text, clip_dur)
         else:
-            clip_dur = (
-                dur + transition_dur
-                if (num_scenes > 1 and idx < num_scenes - 1 and dur > transition_dur)
-                else dur
-            )
-            logger.info(f"Scene {idx+1}/{num_scenes}: {vis_path.name if vis_path else '?'} ({dur:.2f}s)")
-            clip = prepare_scene_visual(
-                vis_path, clip_dur,
-                scene_index=idx,
-                zoom_ratio=zoom_ratio,
-                punch=punch,
-                apply_grade=apply_grade,
-            )
-            if idx > 0 and transition_dur > 0 and clip_dur > transition_dur:
-                clip = clip.crossfadein(transition_dur)
+            if vis_path is None:                                   # failed lookup: reuse the last good visual
+                logger.warning(f"Scene {idx+1}: no visual found, using fallback")
+                vis_path = last_good
+            if vis_path is None:                                   # nothing to reuse (e.g. scene 1)
+                clip = ColorClip(size=(target_w, target_h), color=(15, 12, 40)).set_duration(clip_dur)
+            else:
+                last_good = vis_path
+                logger.info(f"Scene {idx+1}/{num_scenes}: {vis_path.name} ({dur:.2f}s)")
+                clip = prepare_scene_visual(vis_path, clip_dur, scene_index=idx,
+                                            zoom_ratio=zoom_ratio, punch=punch, apply_grade=apply_grade)
 
+        if idx > 0 and transition_dur > 0 and clip_dur > transition_dur:
+            clip = clip.crossfadein(transition_dur)                # now applies to cards too
         video_clips.append(clip)
 
     if num_scenes > 1 and transition_dur > 0:

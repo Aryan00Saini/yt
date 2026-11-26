@@ -7,13 +7,13 @@ both entry points delegate here so the logic is never duplicated.
 
 from pathlib import Path
 from typing import Callable, List, Optional
-
+from src.assemble import assemble_short, _clean
 from src.utils import load_config, slugify, OUTPUT_DIR, CACHE_DIR, logger
 from src.script_gen import generate_script, generate_script_from_custom_text
 from src.tts import generate_voiceover_with_timing
 from src.captions import transcribe_with_whisper
 from src.visuals import fetch_all_visuals
-from src.assemble import assemble_short
+
 
 
 def run_pipeline(
@@ -108,24 +108,10 @@ def run_pipeline(
     out = OUTPUT_DIR / f"{slug}.mp4"
 
     # Build the global emphasis word set from all scenes
-    emphasis = frozenset(
-        w.lower().strip(".,!?;:\"'()[]{}")
-        for s in script.scenes
-        for w in (s.emphasis if hasattr(s, "emphasis") else [])
-    )
-    hook_text = getattr(script, "hook_text", "") or ""
-
+    emph = frozenset(_clean(w) for s in script.scenes for w in s.emphasis)
     assemble_short(
-        scene_visuals=visuals,
-        scene_durations=scene_durations,
-        voiceover_path=audio_path,
-        word_timestamps=words,
-        output_path=out,
-        config=config,
-        draft=draft,
-        hook_text=hook_text,
-        emphasis=emphasis,
-        scenes=script.scenes,
-    )
+        scene_visuals=visuals, scene_durations=scene_durations,
+        voiceover_path=audio_path, word_timestamps=words, output_path=out, config=config,
+        draft=draft, hook_text=script.hook_text, emphasis=emph, scenes=script.scenes)
 
     return out, script

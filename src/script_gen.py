@@ -2,24 +2,29 @@ import os
 import json
 import re
 from typing import List, Optional
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from src.utils import logger
-
 
 class Scene(BaseModel):
     narration: str = Field(description="8-14 spoken words")
     visual_keywords: List[str] = Field(description="2-4 literal, filmable search terms, most specific first")
-    image_prompt: str = Field(description="One sentence describing a single still image for this scene, no text in image")
-    emphasis: List[str] = Field(default_factory=list, description="1-2 words copied exactly from narration that carry the key fact (a number, a name, or the surprising word)")
-    card_text: Optional[str] = Field(default=None, description="A striking number or 1-3 word phrase to show full-screen instead of a visual. Use in at most 2 scenes total. Null for most scenes.")
-
+    image_prompt: str = ""                       # falls back to keywords when empty
+    emphasis: List[str] = Field(default_factory=list)
+    card_text: Optional[str] = None
 
 class ShortScript(BaseModel):
-    title: str = Field(description="Catchy YouTube Short title under 60 characters with hook")
-    description: str = Field(description="Description with relevant tags and summary")
-    tags: List[str] = Field(description="5-8 relevant trending tags")
-    hook_text: str = Field(description="Max 4 words ALL CAPS — the most shocking part of the hook, shown as a text overlay in the first 1.8 seconds")
-    scenes: List[Scene] = Field(description="Ordered list of scenes composing the short")
+    title: str
+    description: str
+    tags: List[str]
+    scenes: List[Scene]
+    hook_text: str = ""                          # max 4 words, ALL CAPS
+
+    @model_validator(mode="after")
+    def _fill_hook(self):
+        if not self.hook_text and self.scenes:
+            words = re.sub(r"[^\w\s%°']", "", self.scenes[0].narration).split()
+            self.hook_text = " ".join(words[:4]).upper()
+        return self
 
 
 PROMPT_TEMPLATE = """You are a scriptwriter for a faceless {niche} Shorts channel. Write a {duration}-second script about: {topic}

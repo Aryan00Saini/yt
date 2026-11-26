@@ -60,7 +60,7 @@ def run_pipeline(
     if custom_body and looks_like_production_script(custom_body):
         plan = parse_production_script(custom_body)
         topic = topic or plan.topic
-    slug = slugify(topic or custom_body[:40])
+    slug = slugify((plan.title if plan else None) or topic or custom_body[:40])
 
     if draft:
         config["render"] = {"preset": "ultrafast", "crf": 28}

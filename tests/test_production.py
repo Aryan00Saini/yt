@@ -154,3 +154,9 @@ def test_review_edge_cases_round3():
 
     assert _sentences("When did it sink?1912 was the year.") == ["When did it sink?", "1912 was the year."]
     assert _sentences("It was 8.5 degrees") == ["It was 8.5 degrees"]
+
+    cue = parse_production_script("[Cold Open] (pause) Nobody saw it coming.\n[Main, 4-30s] Then it happened.")
+    assert "Nobody saw it coming." in cue.narration
+
+    nomusic = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nAudio (no music)\n- Whoosh at the start")
+    assert any(c.sound == "whoosh" for c in nomusic.sfx)

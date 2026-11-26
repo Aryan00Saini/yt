@@ -159,12 +159,12 @@ _TIMED_SECTION_RE = re.compile(
 
 def _match_section(line: str, mode: Optional[str]):
     m = _SECTION_RE.match(line)
-    if m:
+    if m and (m.group("a") or re.fullmatch(_KNOWN_SECTIONS, m.group("name").strip(), flags=re.I)):
         return m
-    if mode in ("overlays", "audio", "visuals", "sources", "factcheck"):
+    if m or mode in ("overlays", "audio", "visuals", "sources", "factcheck"):
         return None
     m = _NAMED_SECTION_RE.match(line)
-    if m and (m.group("a") or not m.group("rest") or re.match(r"^\S+\s*[:.–—-]", line[len(m.group("name")):].lstrip() or ":")):
+    if m and (m.group("a") or not m.group("rest") or re.match(r"^[:.–—-]", line[len(m.group("name")):].lstrip() or ":")):
         return m
     return _TIMED_SECTION_RE.match(line)
 
@@ -213,12 +213,14 @@ def _strip_quotes(text: str) -> str:
 def looks_like_production_script(text: str) -> bool:
     """True when the text is a full brief (sections / overlays / music notes), not plain narration."""
     lines = [_clean_line(l) for l in text.splitlines() if l.strip()]
-    if any(_SECTION_RE.match(l) for l in lines):
-        return True
-    if sum(bool(_match_section(l, None)) for l in lines) >= 2:
+    sections = sum(bool(_match_section(l, None)) for l in lines)
+    if sections >= 2:
         return True
     kinds = {_heading_kind(l) for l in lines}
-    return bool(kinds & {"overlays", "audio", "visuals"})
+    if kinds & {"overlays", "audio", "visuals"}:
+        return True
+    has_title = any(re.match(r"^(?:video\s+)?title\s*:", l, flags=re.I) for l in lines)
+    return bool(sections or has_title) and bool(kinds & {"script", "sources", "factcheck"} or has_title)
 
 
 def _spoken(line: str) -> str:
@@ -233,6 +235,7 @@ def parse_production_script(text: str) -> ProductionPlan:
     mode: Optional[str] = None
     buckets: Dict[str, List[str]] = {"audio": [], "visuals": [], "sources": [], "overlays": []}
     current: Optional[Section] = None
+    audio_default: Optional[str] = None
 
     for raw in text.splitlines():
         line = _clean_line(raw)
@@ -260,6 +263,10 @@ def parse_production_script(text: str) -> ProductionPlan:
         kind = _heading_kind(line)
         if kind:
             mode = kind
+            if kind == "audio":
+                is_music = re.search(r"music|soundtrack|score", line, flags=re.I)
+                is_sfx = re.search(r"sfx|effect|sound", line, flags=re.I)
+                audio_default = "Music" if is_music and not is_sfx else "SFX" if is_sfx and not is_music else None
             continue
 
         if mode is None:
@@ -276,7 +283,10 @@ def parse_production_script(text: str) -> ProductionPlan:
                 plan.sections.append(current)
             current.text = f"{current.text} {spoken}".strip()
         elif mode in buckets:
-            buckets[mode].append(_strip_bullet(line))
+            item = _strip_bullet(line)
+            if mode == "audio" and audio_default and not re.match(r"^\w[\w ]*:", item):
+                item = f"{audio_default}: {item}"
+            buckets[mode].append(item)
 
     plan.topic = plan.topic or plan.title
     plan.title = plan.title or plan.topic
@@ -492,7 +502,7 @@ def parse_visuals(text: str) -> VisualPlan:
 # ── Scene splitting ───────────────────────────────────────────────────────────
 
 def _sentences(text: str) -> List[str]:
-    return [s.strip() for s in re.findall(r"[^.!?]*[.!?]+[\"”’']*|[^.!?]+$", text) if s.strip()]
+    return [s.strip() for s in re.findall(r"(?:[^.!?]|\.(?=\d))*[.!?]+[\"”’']*|(?:[^.!?]|\.(?=\d))+$", text) if s.strip()]
 
 
 def split_into_scenes(plan: ProductionPlan, min_words: int = 6, max_words: int = 15) -> List[Tuple[int, str]]:

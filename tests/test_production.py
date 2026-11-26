@@ -90,3 +90,23 @@ def test_timing_follows_actual_speech():
     assert abs(fear.start - said("fear")) < 0.2
     twist = plan.sections[2]
     assert any(a <= twist.act_start <= b + 0.01 for a, b in plan.music.silences)
+
+
+def test_review_edge_cases():
+    from src.production import _sentences
+
+    plain = "Octopuses have three hearts.\n[pause]\nTwo of them pump blood to the gills."
+    assert not looks_like_production_script(plain)
+
+    single = "Title: Tiny brief\nHook (0-5s): Water boils at 100 degrees.\nSources\n- Some book"
+    assert looks_like_production_script(single)
+    plan = parse_production_script(single)
+    assert plan.narration == "Water boils at 100 degrees." and plan.sources == ["Some book"]
+
+    scenes = parse_production_script("[Hook, 0-3s] Hi there.\n[Main, 3-9s] Intro line.\nScene 2: Now for the story.")
+    assert "Scene 2" not in scenes.narration and scenes.sections[-1].text == "Now for the story."
+
+    music = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nMusic\n- Eerie medieval folk that gets faster; silence before the twist")
+    assert "eerie" in music.music.moods and music.music.build and music.music.silence_before == ["twist"]
+
+    assert _sentences("It was 8.5 degrees. Cold.") == ["It was 8.5 degrees.", "Cold."]

@@ -262,6 +262,7 @@ def assemble_short(
     emphasis: FrozenSet[str] = frozenset(),
     scenes: Optional[list] = None,       # list of Scene objects for card_text detection
     plan=None,                           # resolved ProductionPlan (overlays, music, SFX, look)
+    music_file: Optional[Path] = None,
 ) -> Path:
     """Combines scene visuals, voiceover, captions, music, SFX, and overlays into the final MP4."""
     output_path = Path(output_path)
@@ -330,7 +331,8 @@ def assemble_short(
     voice_audio  = AudioFileClip(str(voiceover_path))
     audio_tracks = [voice_audio]
 
-    bg_music_path = pick_music(plan.music.moods) if plan else pick_background_music()
+    bg_music_path = None if plan and plan.music.muted else music_file or (
+        pick_music(plan.music.moods) if plan else pick_background_music())
     if bg_music_path:
         music_vol = audio_cfg.get("music_volume", 0.12)
         logger.info(f"Background music: {bg_music_path.name} (vol={music_vol})")
@@ -412,6 +414,7 @@ def assemble_short(
         preset=preset,
         threads=os.cpu_count(),
         ffmpeg_params=["-crf", str(crf), "-pix_fmt", "yuv420p", "-movflags", "+faststart"],
+        temp_audiofile=str(output_path.with_suffix(".temp.m4a")),
         logger="bar",
     )
 

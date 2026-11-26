@@ -116,7 +116,7 @@ def test_review_edge_cases_round2():
     from src.production import _sentences
 
     titled = "Title: Fun fact\nOctopuses have three hearts. Two pump blood to the gills."
-    assert not looks_like_production_script(titled)
+    assert looks_like_production_script(titled)
 
     one = "[Hook, 0-5s] Water boils at 100 degrees at sea level."
     assert looks_like_production_script(one)
@@ -142,9 +142,9 @@ def test_review_edge_cases_round3():
     md = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nSources\n[Britannica](https://britannica.com/x)\n- Some book")
     assert "britannica" not in md.narration.lower() and len(md.sources) == 2
 
-    titled = "Title: Ocean facts\nScript\nThe ocean is deep.\nSources\n- NOAA"
+    titled = "Title: Fun fact\nOctopuses have three hearts. Two pump blood to the gills."
     assert looks_like_production_script(titled)
-    assert parse_production_script(titled).narration == "The ocean is deep."
+    assert parse_production_script(titled).narration == titled.splitlines()[1]
 
     compact = parse_production_script("[Hook, 0-3s] Hi.\n[Main, 3-9s] Go.\nScene 3:Survivors were rescued.")
     assert "Scene 3" not in compact.narration

@@ -60,6 +60,7 @@ class MusicPlan:
     moods: List[str] = field(default_factory=list)
     description: str = ""
     build: bool = False
+    muted: bool = False
     silence_before: List[str] = field(default_factory=list)          # section names
     silences: List[Tuple[float, float]] = field(default_factory=list)  # resolved windows
 
@@ -165,14 +166,16 @@ def _short_times(m) -> bool:
 def _match_section(line: str, mode: Optional[str], strict: bool = False):
     meta = mode in ("overlays", "audio", "visuals", "sources", "factcheck")
     m = _SECTION_RE.match(line)
-    if m and re.match(r"\((?:https?://|www\.|\.{0,2}/|#)", m.group("rest")):  # Markdown link
+    if m and not m.group("a") and re.match(r"^\[[^\]]+\]\(", line):
         return None
     known = m and re.fullmatch(_KNOWN_SECTIONS, m.group("name").strip(), flags=re.I)
     if m and _short_times(m) and (not (strict or meta) or m.group("a") or known):
         return m
-    if m or meta:
+    if m:
         return None
     m = _NAMED_SECTION_RE.match(line)
+    if meta and not (m and (m.group("a") or line[len(m.group("name")):].lstrip().startswith(":"))):
+        return None
     if m and _short_times(m) and (m.group("a") or not m.group("rest") or re.match(
             r"^(?::|[.–—-](?:\s|$))", line[len(m.group("name")):].lstrip() or ":")):
         return m
@@ -232,7 +235,7 @@ def looks_like_production_script(text: str) -> bool:
     if kinds & {"overlays", "audio", "visuals"}:
         return True
     has_title = any(re.match(r"^(?:video\s+)?title\s*:", l, flags=re.I) for l in lines)
-    return bool(sections or "script" in kinds) and bool(kinds & {"script", "sources", "factcheck"} or has_title)
+    return has_title or bool(kinds & {"script", "sources", "factcheck"})
 
 
 def _spoken(line: str) -> str:
@@ -283,9 +286,10 @@ def parse_production_script(text: str) -> ProductionPlan:
             continue
 
         if mode is None:
-            if not plan.topic:
+            if not plan.title and not plan.topic:
                 plan.topic = line
-            continue
+                continue
+            mode = "script"
 
         if mode == "script":
             spoken = _spoken(line)

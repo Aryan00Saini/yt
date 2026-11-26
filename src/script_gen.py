@@ -236,6 +236,13 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
     gemini_key = os.getenv("GEMINI_API_KEY")
     groq_key = os.getenv("GROQ_API_KEY")
 
+    def verified(parsed):
+        if [word for scene in parsed.scenes for word in scene.narration.split()] != script_text.split():
+            raise ValueError("Generated scenes changed the supplied narration.")
+        if title:
+            parsed.title = title[:60]
+        return parsed
+
     if gemini_key:
         try:
             logger.info("Structuring custom script into scenes using Gemini...")
@@ -251,10 +258,7 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
                     temperature=0.3,
                 ),
             )
-            parsed = resp.parsed
-            if title:
-                parsed.title = title[:60]
-            return parsed
+            return verified(resp.parsed)
         except Exception as e:
             logger.warning(f"Gemini custom script structuring failed: {e}")
 
@@ -278,9 +282,7 @@ def generate_script_from_custom_text(script_text: str, title: Optional[str] = No
             )
             resp.raise_for_status()
             parsed = ShortScript.model_validate(json.loads(clean_json_response(resp.json()["choices"][0]["message"]["content"])))
-            if title:
-                parsed.title = title[:60]
-            return parsed
+            return verified(parsed)
         except Exception as e:
             logger.warning(f"Groq custom script structuring failed: {e}")
 
@@ -408,7 +410,7 @@ def generate_script_from_plan(plan) -> ShortScript:
         visuals = _offline_plan_visuals(plan, narrations, plan.scene_sections)
 
     if not tags:
-        tags = list(dict.fromkeys(_content_words(plan.topic) + ["shorts", "history"]))[:8]
+        tags = list(dict.fromkeys(_content_words(plan.topic) + ["shorts"]))[:8]
     return ShortScript(
         title=(plan.title or plan.topic)[:100],
         description=plan.description(),

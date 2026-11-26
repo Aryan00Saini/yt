@@ -1,7 +1,21 @@
 import json
 from pathlib import Path
 from typing import List, Dict, Any
-from src.utils import logger, CACHE_DIR
+from src.utils import logger
+
+
+def subtitles_srt(words):
+    def timestamp(seconds):
+        minutes, ms = divmod(round(seconds * 1000), 60000)
+        hours, minutes = divmod(minutes, 60)
+        return f"{hours:02}:{minutes:02}:{ms // 1000:02},{ms % 1000:03}"
+
+    cues = []
+    for start in range(0, len(words), 4):
+        group = words[start:start + 4]
+        cues.append(f"{len(cues) + 1}\n{timestamp(group[0]['start'])} --> {timestamp(group[-1]['end'])}\n"
+                    + " ".join(w["word"].strip() for w in group))
+    return "\n\n".join(cues) + "\n"
 
 class WordTimestamp:
     def __init__(self, word: str, start: float, end: float, probability: float = 1.0):

@@ -5,14 +5,15 @@ Calling run_pipeline() is the single source of truth for the generation flow;
 both entry points delegate here so the logic is never duplicated.
 """
 
-import hashlib
 from pathlib import Path
 from typing import Callable, List, Optional
+from uuid import uuid4
 from src.assemble import assemble_short, _clean
 from src.utils import load_config, slugify, OUTPUT_DIR, CACHE_DIR, logger
 from src.script_gen import generate_script, generate_script_from_custom_text
 from src.tts import generate_voiceover_with_timing
-from src.captions import transcribe_with_whisper
+from src.captions import subtitles_srt, transcribe_with_whisper
+from src.pacing import MIN_SECONDS, MAX_SECONDS, fit_voiceover
 from src.visuals import fetch_all_visuals, make_map_card, search_reference_image
 from src.production import looks_like_production_script, parse_production_script, resolve_timing
 from src.script_gen import generate_script_from_plan
@@ -22,7 +23,10 @@ def run_pipeline(
     topic: Optional[str] = None,
     custom_body: Optional[str] = None,
     media_files: Optional[List[Path]] = None,
-    duration: int = 45,
+    duration: int = 50,
+    fit_duration: bool = True,
+    music_file: Optional[Path] = None,
+    niche: Optional[str] = None,
     voice: Optional[str] = None,
     whisper_model: str = "base",
     draft: bool = False,
@@ -48,6 +52,8 @@ def run_pipeline(
     """
     if not topic and not custom_body:
         raise ValueError("Provide a topic or a custom script body.")
+    if fit_duration and not MIN_SECONDS <= duration <= MAX_SECONDS:
+        raise ValueError("Fit mode requires a 40-60 second target. Use natural duration for other lengths.")
 
     config = load_config()
     v = config.get("voice", {})
@@ -62,8 +68,7 @@ def run_pipeline(
         plan = parse_production_script(custom_body)
         topic = topic or plan.topic
     slug = slugify((plan.title if plan else None) or topic or custom_body[:40])
-    if plan:
-        slug = f"{slug[:50]}_{hashlib.sha1(custom_body.encode()).hexdigest()[:6]}"
+    slug = f"{slug or 'short'}_{uuid4().hex[:12]}"
 
     if draft:
         config["render"] = {"preset": "ultrafast", "crf": 28}
@@ -80,7 +85,7 @@ def run_pipeline(
         script = generate_script(
             topic,
             duration=duration,
-            niche=script_cfg.get("niche", "science facts"),
+            niche=niche or script_cfg.get("niche", "science facts"),
             model_name=script_cfg.get("model", "gemini-2.5-flash"),
             words_per_second=script_cfg.get("words_per_second", 2.5),
             seconds_per_scene=script_cfg.get("seconds_per_scene", 3.5),
@@ -99,6 +104,10 @@ def run_pipeline(
             model_size=whisper_model,
             compute_type=config.get("captions", {}).get("compute_type", "int8"),
         )
+    if fit_duration:
+        before = sum(scene_durations)
+        audio_path, words, scene_durations = fit_voiceover(audio_path, words, scene_durations, duration)
+        progress(f"  Pacing: {before:.1f}s recorded → {sum(scene_durations):.1f}s final.")
 
     # ── Step 3: Visuals ───────────────────────────────────────────────────────
     progress("Step 3/4: Fetching visuals...")
@@ -138,6 +147,12 @@ def run_pipeline(
     assemble_short(
         scene_visuals=visuals, scene_durations=scene_durations,
         voiceover_path=audio_path, word_timestamps=words, output_path=out, config=config,
-        draft=draft, hook_text=script.hook_text, emphasis=emph, scenes=script.scenes, plan=plan)
+        draft=draft, hook_text=script.hook_text, emphasis=emph, scenes=script.scenes, plan=plan,
+        music_file=music_file)
+    out.with_suffix(".srt").write_text(subtitles_srt(words), encoding="utf-8")
+    out.with_suffix(".txt").write_text(
+        f"{script.title}\n\n{script.description}\n\nTags: {', '.join(script.tags)}\n",
+        encoding="utf-8",
+    )
 
     return out, script

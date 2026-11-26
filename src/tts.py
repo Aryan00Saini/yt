@@ -1,5 +1,5 @@
 import asyncio
-import time
+from contextlib import ExitStack
 from pathlib import Path
 from typing import List, Dict, Any
 import edge_tts
@@ -58,23 +58,23 @@ def generate_voiceover_with_timing(
     per_scene_words = asyncio.run(_synth_all(script, voice, rate, pitch, out_dir))
     clips, words_out, durations, t0 = [], [], [], 0.0
 
-    for i, words in enumerate(per_scene_words):
-        clip = AudioFileClip(str(out_dir / f"scene_{i:02d}.mp3"))
-        for w in words:
-            words_out.append({
-                "word": w["word"],
-                "start": w["start"] + t0,
-                "end": w["end"] + t0,
-            })
-        durations.append(clip.duration)
-        clips.append(clip)
-        t0 += clip.duration
+    final = out_dir / "voiceover.wav"
+    with ExitStack() as stack:
+        for i, words in enumerate(per_scene_words):
+            clip = stack.enter_context(AudioFileClip(str(out_dir / f"scene_{i:02d}.mp3")))
+            for w in words:
+                words_out.append({
+                    "word": w["word"],
+                    "start": w["start"] + t0,
+                    "end": w["end"] + t0,
+                })
+            durations.append(clip.duration)
+            clips.append(clip)
+            t0 += clip.duration
+        concatenate_audioclips(clips).write_audiofile(str(final), codec="pcm_s16le", logger=None)
 
-    final = out_dir / "voiceover.mp3"
-    concatenate_audioclips(clips).write_audiofile(str(final), logger=None)
-    for c in clips:
-        c.close()
-
+    if not all(per_scene_words):  # Don't silently omit captions for individual scenes.
+        words_out = []
     logger.info(f"Voiceover saved to {final} ({len(words_out)} word boundaries, {t0:.2f}s)")
     return final, words_out, durations
 
